@@ -105,6 +105,7 @@ jobs:
 
           echo "Checking main.py is the new version..."
           grep -n 'def _label' main.py
+          grep -n 'style_system_bars' main.py
 
           echo "Checking Python syntax..."
           python -m py_compile \
@@ -229,6 +230,17 @@ jobs:
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Verify MediaMerger is in APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK="$(ls "$GITHUB_WORKSPACE"/bin/*.apk | head -n1)"
+          echo "APK: $APK"
+          mkdir -p /tmp/apkchk
+          cd /tmp/apkchk
+          unzip -q -o "$APK" 'classes*.dex'
+          grep -l 'org/bilibilidl/MediaMerger' classes*.dex
 
       - name: Save build cache
         if: always()
