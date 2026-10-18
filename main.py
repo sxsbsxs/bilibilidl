@@ -556,10 +556,44 @@ class AppRoot(BoxLayout):
         ui(show)
 
 class BiliBilidlApp(App):
-    title='bilibilidl'
-    def build(self):
-        Window.clearcolor=WHITE
-        return AppRoot(self)
+    title = 'bilibilidl'
 
-if __name__=='__main__':
+    def build(self):
+        Window.clearcolor = WHITE
+        try:
+            return AppRoot(self)
+        except Exception:
+            error = traceback.format_exc()
+
+            try:
+                os.makedirs(self.user_data_dir, exist_ok=True)
+                path = os.path.join(
+                    self.user_data_dir, 'startup_crash.log'
+                )
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(error)
+            except Exception:
+                pass
+
+            screen = BoxLayout(
+                orientation='vertical',
+                padding=dp(16),
+                spacing=dp(10)
+            )
+            screen.add_widget(Label(
+                text='bilibilidl 启动失败，请截图反馈',
+                color=(0.8, 0.1, 0.25, 1),
+                size_hint_y=None,
+                height=dp(48)
+            ))
+            screen.add_widget(Label(
+                text=error[-5000:],
+                color=(0.14, 0.13, 0.15, 1),
+                halign='left',
+                valign='top'
+            ))
+            return screen
+
+
+if __name__ == '__main__':
     BiliBilidlApp().run()
