@@ -80,11 +80,10 @@ jobs:
           test -f bili_api.py
           test -f '下载器.py'
           test -f '登录管理器.py'
-          test -f 'bilibilidl图标.png'
           test -f 'NotoSansCJKsc-Regular.ttf'
-
-          echo "Project files found:"
-          ls -la
+          test -f 'bilibilidl图标.png'
+          test -f 'bilibilidl加载图.png'
+          test -f src/org/bilibilidl/MediaMerger.java
 
           echo "Checking Python syntax..."
           python -m py_compile \
@@ -93,8 +92,11 @@ jobs:
             '下载器.py' \
             '登录管理器.py'
 
-          echo "Checking image and font files..."
-          file 'bilibilidl图标.png' 'NotoSansCJKsc-Regular.ttf'
+          echo "Checking Java package declaration..."
+          grep -n 'package org.bilibilidl;' \
+            src/org/bilibilidl/MediaMerger.java
+
+          echo "Project file checks passed."
 
       - name: Prepare Android SDK
         shell: bash
@@ -118,7 +120,7 @@ jobs:
           SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
           test -f "$SDKMANAGER"
 
-          # Legacy sdkmanager path used by Buildozer 1.5.0
+          # Legacy path used by Buildozer 1.5.0
           mkdir -p "$SDK/tools/bin"
           ln -sf "$SDKMANAGER" "$SDK/tools/bin/sdkmanager"
 
@@ -134,18 +136,10 @@ jobs:
           test -d "$SDK/platforms/android-33"
           test -x "$SDK/build-tools/33.0.2/aidl"
 
-      - name: Check and patch Java MediaMuxer source
+      - name: Check Java MediaCodec compatibility
         shell: bash
         run: |
           set -euxo pipefail
-
-          JAVA_FILE="src/org/bilibilidl/MediaMerger.java"
-
-          if [ ! -f "$JAVA_FILE" ]; then
-            echo "::error::Missing $JAVA_FILE"
-            echo "Move MediaMerger.java into src/org/bilibilidl/."
-            exit 1
-          fi
 
           python - <<'PY'
           from pathlib import Path
@@ -153,35 +147,43 @@ jobs:
           path = Path("src/org/bilibilidl/MediaMerger.java")
           source = path.read_text(encoding="utf-8")
 
-          if "MediaMuxer.BufferInfo" in source:
-              source = source.replace(
-                  "MediaMuxer.BufferInfo",
-                  "MediaCodec.BufferInfo"
+          if "package org.bilibilidl;" not in source:
+              raise SystemExit(
+                  "MediaMerger.java package must be org.bilibilidl"
               )
 
-          if "MediaCodec.BufferInfo" in source:
-              if "import android.media.MediaCodec;" not in source:
-                  source = source.replace(
-                      "import android.media.MediaExtractor;",
-                      "import android.media.MediaCodec;\n"
-                      "import android.media.MediaExtractor;",
-                      1
-                  )
-
+          # BufferInfo and KEY_FRAME belong to MediaCodec, not MediaMuxer.
           source = source.replace(
-              "MediaMuxer\n                        .BUFFER_FLAG_KEY_FRAME",
-              "MediaCodec\n                        .BUFFER_FLAG_KEY_FRAME"
+              "MediaMuxer.BufferInfo",
+              "MediaCodec.BufferInfo"
           )
           source = source.replace(
               "MediaMuxer.BUFFER_FLAG_KEY_FRAME",
               "MediaCodec.BUFFER_FLAG_KEY_FRAME"
           )
+          source = source.replace(
+              "MediaMuxer\n                        .BUFFER_FLAG_KEY_FRAME",
+              "MediaCodec\n                        .BUFFER_FLAG_KEY_FRAME"
+          )
+
+          if "MediaCodec.BufferInfo" in source:
+              if "import android.media.MediaCodec;" not in source:
+                  marker = "import android.media.MediaExtractor;"
+                  if marker not in source:
+                      raise SystemExit(
+                          "Cannot safely add MediaCodec import"
+                      )
+                  source = source.replace(
+                      marker,
+                      "import android.media.MediaCodec;\n" + marker,
+                      1
+                  )
 
           if "MediaMuxer.BufferInfo" in source:
-              raise SystemExit("Java compatibility patch failed")
+              raise SystemExit("MediaMuxer.BufferInfo remains after check")
 
           path.write_text(source, encoding="utf-8")
-          print("Java source checked.")
+          print("Java source checks passed.")
           PY
 
       - name: Configure python-for-android
