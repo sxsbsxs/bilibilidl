@@ -11,13 +11,13 @@ permissions:
 
 concurrency:
   group: bilibilidl-apk-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build Android APK
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     env:
       ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
@@ -69,6 +69,17 @@ jobs:
             "$RUNNER_TEMP/python-for-android"
 
           echo "P4A_SOURCE_DIR=$RUNNER_TEMP/python-for-android" >> "$GITHUB_ENV"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-${{ github.run_id }}
+          restore-keys: |
+            buildozer-${{ hashFiles('buildozer.spec') }}-
+            buildozer-
 
       - name: Check project files
         shell: bash
@@ -208,6 +219,15 @@ jobs:
         run: |
           set -o pipefail
           buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Save build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-${{ hashFiles('buildozer.spec') }}-${{ github.run_id }}
 
       - name: Upload APK
         if: success()
