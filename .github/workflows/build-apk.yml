@@ -81,6 +81,13 @@ jobs:
             buildozer-${{ hashFiles('buildozer.spec') }}-
             buildozer-
 
+      - name: Remove stale app copy
+        shell: bash
+        run: |
+          rm -rf .buildozer/android/app
+          rm -rf .buildozer/android/platform/build-*/dists
+          rm -rf bin
+
       - name: Check project files
         shell: bash
         run: |
@@ -95,6 +102,9 @@ jobs:
           test -f 'bilibilidl图标.png'
           test -f 'bilibilidl加载图.png'
           test -f src/org/bilibilidl/MediaMerger.java
+
+          echo "Checking main.py is the new version..."
+          grep -n 'def _label' main.py
 
           echo "Checking Python syntax..."
           python -m py_compile \
