@@ -9,13 +9,14 @@ source.include_exts = py,png,jpg,jpeg,ttf,ttc,otf,kv,atlas,json,xml,java,txt,md
 source.include_patterns = *.png,*.jpg,*.jpeg,*.ttf,*.ttc,*.otf,*.kv,*.atlas,src/*,assets/*
 source.exclude_dirs = bin,.buildozer,__pycache__,.git
 
-version = 2.5.2
+version = 2.5.3
 
 orientation = portrait
 fullscreen = 0
 
 icon.filename = %(source.dir)s/bilibilidl图标.png
 presplash.filename = %(source.dir)s/bilibilidl加载图.png
+android.presplash_color = #FDEBF2
 
 # Python 和界面依赖（p4a 不会自动装依赖的依赖，所以这里全部列出）
 requirements = python3,kivy==2.2.1,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
