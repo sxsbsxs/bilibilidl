@@ -7,6 +7,7 @@ package.domain = org.bilibilidl
 source.dir = .
 source.include_exts = py,png,jpg,jpeg,ttf,ttc,otf,kv,atlas,json,xml,java,txt,md
 source.include_patterns = *.png,*.jpg,*.jpeg,*.ttf,*.ttc,*.otf,*.kv,*.atlas,src/*,assets/*
+source.exclude_dirs = bin,.buildozer,__pycache__,.git
 
 version = 2.5.2
 
@@ -16,23 +17,21 @@ fullscreen = 0
 icon.filename = %(source.dir)s/bilibilidl图标.png
 presplash.filename = %(source.dir)s/bilibilidl加载图.png
 
-# Python 和界面依赖
-requirements = python3,kivy==2.2.1,kivymd==1.1.1,pillow,pyjnius,certifi,requests,qrcode
-
-# Python-for-Android
-p4a.python_version = 3.10
+# Python 和界面依赖（p4a 不会自动装依赖的依赖，所以这里全部列出）
+requirements = python3,kivy==2.2.1,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
 
 # Android 兼容设置
 android.api = 33
 android.minapi = 24
 android.ndk = 25c
 android.archs = arm64-v8a
+android.accept_sdk_license = True
 
-# Android 源码目录
+# Android 源码目录（Java 文件放在 src/org/bilibilidl/MediaMerger.java）
 android.add_src = src
 
 # 权限
-android.permissions = INTERNET,ACCESS_NETWORK_STATE
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,WRITE_EXTERNAL_STORAGE
 
 # 调试设置
 android.debuggable = True
