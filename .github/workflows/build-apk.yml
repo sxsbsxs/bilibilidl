@@ -78,8 +78,8 @@ jobs:
           test -f buildozer.spec
           test -f main.py
           test -f bili_api.py
-          test -f '下载器.py'
-          test -f '登录管理器.py'
+          test -f 'downloader.py'
+          test -f 'login_manager.py'
           test -f 'NotoSansCJKsc-Regular.ttf'
           test -f 'bilibilidl图标.png'
           test -f 'bilibilidl加载图.png'
@@ -89,8 +89,8 @@ jobs:
           python -m py_compile \
             main.py \
             bili_api.py \
-            '下载器.py' \
-            '登录管理器.py'
+            'downloader.py' \
+            'login_manager.py'
 
           echo "Checking Java package declaration..."
           grep -n 'package org.bilibilidl;' \
