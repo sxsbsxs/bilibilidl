@@ -83,9 +83,14 @@ public final class MediaMerger {
         ContentValues values = new ContentValues();
         values.put(MediaStore.MediaColumns.DISPLAY_NAME, displayName);
         String lowerName = displayName.toLowerCase(java.util.Locale.ROOT);
-        String mime = lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") ? "image/jpeg" :
-                      lowerName.endsWith(".xml") ? "application/xml" :
-                      lowerName.endsWith(".srt") ? "application/x-subrip" : "video/mp4";
+        String mime;
+        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) mime = "image/jpeg";
+        else if (lowerName.endsWith(".png")) mime = "image/png";
+        else if (lowerName.endsWith(".webp")) mime = "image/webp";
+        else if (lowerName.endsWith(".gif")) mime = "image/gif";
+        else if (lowerName.endsWith(".xml")) mime = "application/xml";
+        else if (lowerName.endsWith(".srt")) mime = "application/x-subrip";
+        else mime = "video/mp4";
         values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
         if (Build.VERSION.SDK_INT >= 29) values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/bilibilidl");
         Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
