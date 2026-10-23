@@ -74,8 +74,11 @@ APP_FONT_BOLD = 'Roboto'
 _font_path = _find_cjk_font()
 if _font_path:
     try:
-        LabelBase.register(name='BiliPinkCJK', fn_regular=_font_path)
-        APP_FONT = APP_FONT_BOLD = 'BiliPinkCJK'
+        # 同一 TTF 同时注册 regular/bold，粗体在多数机型上更明显
+        LabelBase.register(name='BiliPinkCJK', fn_regular=_font_path, fn_bold=_font_path)
+        LabelBase.register(name='BiliPinkCJKBold', fn_regular=_font_path, fn_bold=_font_path)
+        APP_FONT = 'BiliPinkCJK'
+        APP_FONT_BOLD = 'BiliPinkCJKBold'
     except Exception:
         APP_FONT = APP_FONT_BOLD = 'Roboto'
 try:
@@ -88,7 +91,8 @@ print('[bilibilidl] 字体路径: %s' % _font_path if _font_path else
 PINK = (0.94, 0.29, 0.52, 1)
 PALE = (1, 0.94, 0.97, 1)
 DARK = (0.14, 0.13, 0.15, 1)
-MUTED = (0.48, 0.47, 0.5, 1)
+# 次要文字略加深，避免发灰发细
+MUTED = (0.36, 0.35, 0.38, 1)
 WHITE = (1, 1, 1, 1)
 BLUE = (0.35, 0.58, 0.78, 1)
 
@@ -152,6 +156,25 @@ class RoundButton(Button):
         self._shape.size = self.size
 
 
+class CardBox(BoxLayout):
+    """浅粉圆角卡片容器，统一信息区/历史记录样式。"""
+    def __init__(self, radius=16, bg=None, **kw):
+        kw.setdefault('orientation', 'vertical')
+        kw.setdefault('padding', dp(12))
+        kw.setdefault('spacing', dp(6))
+        super().__init__(**kw)
+        self._bg_color = bg or PALE
+        with self.canvas.before:
+            Color(*self._bg_color)
+            self._shape = RoundedRectangle(pos=self.pos, size=self.size,
+                                           radius=[dp(radius)])
+        self.bind(pos=self._sync, size=self._sync)
+
+    def _sync(self, *_):
+        self._shape.pos = self.pos
+        self._shape.size = self.size
+
+
 class AppRoot(BoxLayout):
     def __init__(self, app, **kw):
         super().__init__(orientation='vertical',
@@ -171,9 +194,11 @@ class AppRoot(BoxLayout):
         self._build()
         self.show_page('home')
 
-    def _label(self, text, size=14, color=DARK, height=None,
+    def _label(self, text, size=15, color=DARK, height=None,
                bold=False, halign='left'):
-        kw = dict(text=str(text), font_name=APP_FONT, font_size=dp(size),
+        # 加粗时优先用 APP_FONT_BOLD；单字重字体在部分机型上更明显
+        font = APP_FONT_BOLD if bold else APP_FONT
+        kw = dict(text=str(text), font_name=font, font_size=dp(size),
                   color=color, bold=bold, halign=halign, valign='middle')
         if height:
             kw['size_hint_y'] = None
@@ -233,63 +258,77 @@ class AppRoot(BoxLayout):
         else:
             self._mine_page()
 
+    def _section_title(self, text):
+        return self._label(text, 14, DARK, 24, bold=True)
+
     def _home_page(self):
-        sc = ScrollView()
-        col = BoxLayout(orientation='vertical', spacing=dp(10),
-                        size_hint_y=None)
+        sc = ScrollView(do_scroll_x=False)
+        col = BoxLayout(orientation='vertical', spacing=dp(12),
+                        size_hint_y=None, padding=[0, 0, 0, dp(12)])
         col.bind(minimum_height=col.setter('height'))
-        col.add_widget(self._label('B站视频下载', 20, DARK, 34, True))
+
+        col.add_widget(self._label('B站视频下载', 24, DARK, 38, True))
         col.add_widget(self._label(
-            '支持 BV / AV / 视频链接 / b23.tv 短链接', 12, MUTED, 26))
+            '粘贴 BV / AV / 链接 / 短链 → 解析 → 下载或应用内播放', 14, MUTED, 30))
+
+        # 输入卡片
+        input_card = CardBox(size_hint_y=None, height=dp(150), spacing=dp(8))
         self.url_input = TextInput(
-            hint_text='粘贴 BV 号、AV 号、B站视频链接或 b23.tv 短链接',
-            multiline=True, size_hint_y=None, height=dp(84),
-            padding=dp(12), font_name=APP_FONT, font_size=dp(15),
+            hint_text='BV 号、AV 号、视频链接或 b23.tv 短链接',
+            multiline=True, size_hint_y=None, height=dp(72),
+            padding=[dp(10), dp(10)], font_name=APP_FONT_BOLD, font_size=dp(16),
             foreground_color=DARK, background_normal='',
-            background_active='', background_color=PALE, cursor_color=PINK)
-        col.add_widget(self.url_input)
-        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+            background_active='', background_color=WHITE, cursor_color=PINK)
+        input_card.add_widget(self.url_input)
+        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
         self.parse_btn = RoundButton(text='解析视频')
         self.parse_btn.bind(on_release=lambda *_: self.parse_async())
         row.add_widget(self.parse_btn)
-        self.cover = make_image(size_hint_x=None, width=dp(80))
+        self.cover = make_image(size_hint_x=None, width=dp(72))
         row.add_widget(self.cover)
-        col.add_widget(row)
-        # 标题与信息区改为自适应高度，长文本不再与下方控件重叠
-        self.title_lbl = self._label('解析后显示标题和视频信息',
-                                     16, DARK, None, True)
+        input_card.add_widget(row)
+        col.add_widget(input_card)
+
+        # 视频信息卡片
+        info_card = CardBox(size_hint_y=None)
+        info_card.bind(minimum_height=info_card.setter('height'))
+        self.title_lbl = self._label('解析后显示标题', 18, DARK, None, True)
         self.title_lbl.size_hint_y = None
-        self.title_lbl.height = dp(24)
+        self.title_lbl.height = dp(30)
         self.title_lbl.bind(texture_size=lambda l, s: setattr(
-            l, 'height', s[1] + dp(10)))
-        col.add_widget(self.title_lbl)
+            l, 'height', max(dp(30), s[1] + dp(6))))
+        info_card.add_widget(self.title_lbl)
         self.meta_lbl = self._label(
-            '画质会按接口返回的实际可用列表显示。', 12, MUTED, None)
+            '画质与分P将在解析后显示', 14, MUTED, None)
         self.meta_lbl.size_hint_y = None
-        self.meta_lbl.height = dp(24)
+        self.meta_lbl.height = dp(30)
         self.meta_lbl.bind(texture_size=lambda l, s: setattr(
-            l, 'height', s[1] + dp(10)))
-        col.add_widget(self.meta_lbl)
-        col.add_widget(self._label('分P选择', 13, MUTED, 24))
+            l, 'height', max(dp(30), s[1] + dp(6))))
+        info_card.add_widget(self.meta_lbl)
+        col.add_widget(info_card)
+
+        # 选项
+        col.add_widget(self._section_title('分P'))
         self.part_spinner = Spinner(
-            text='请先解析视频', values=(), font_name=APP_FONT,
+            text='请先解析', values=(), font_name=APP_FONT_BOLD,
             size_hint_y=None, height=dp(46), background_normal='',
-            background_color=PALE, color=DARK)
+            background_color=PALE, color=DARK, font_size=dp(15))
         col.add_widget(self.part_spinner)
-        col.add_widget(self._label('清晰度', 13, MUTED, 24))
+        col.add_widget(self._section_title('清晰度（下载用）'))
         self.quality_spinner = Spinner(
-            text='请先解析视频', values=(), font_name=APP_FONT,
+            text='请先解析', values=(), font_name=APP_FONT_BOLD,
             size_hint_y=None, height=dp(46), background_normal='',
-            background_color=PALE, color=DARK)
+            background_color=PALE, color=DARK, font_size=dp(15))
         col.add_widget(self.quality_spinner)
-        col.add_widget(self._label('下载内容', 13, MUTED, 24))
+        col.add_widget(self._section_title('下载内容'))
         self.mode_spinner = Spinner(
-            text='视频 + 音频（MP4）', font_name=APP_FONT,
+            text='视频 + 音频（MP4）', font_name=APP_FONT_BOLD,
             values=('视频 + 音频（MP4）', '封面图片', '弹幕 XML', '字幕 SRT'),
             size_hint_y=None, height=dp(46), background_normal='',
-            background_color=PALE, color=DARK)
+            background_color=PALE, color=DARK, font_size=dp(15))
         col.add_widget(self.mode_spinner)
-        btn_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+
+        btn_row = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
         self.dl_btn = RoundButton(text='开始下载')
         self.dl_btn.bind(on_release=lambda *_: self.start_download())
         btn_row.add_widget(self.dl_btn)
@@ -297,14 +336,15 @@ class AppRoot(BoxLayout):
         self.play_btn.bind(on_release=lambda *_: self.start_online_play())
         btn_row.add_widget(self.play_btn)
         col.add_widget(btn_row)
+
         self.progress = ProgressBar(max=100, value=0,
-                                    size_hint_y=None, height=dp(8))
+                                    size_hint_y=None, height=dp(6))
         col.add_widget(self.progress)
         self.status = self._label(
-            '下载文件先保存在应用私有目录，可在“已下载”中导出。点「在线播放」可缓冲后直接播放。',
-            12, MUTED, 52)
+            '下载保存到本机；在线播放在应用内打开官方播放器，无需整段缓存。',
+            14, MUTED, 46)
         col.add_widget(self.status)
-        self.log_lbl = self._label('', 11, MUTED, 68)
+        self.log_lbl = self._label('', 13, MUTED, 42)
         col.add_widget(self.log_lbl)
         sc.add_widget(col)
         self.body.add_widget(sc)
@@ -602,11 +642,32 @@ class AppRoot(BoxLayout):
                 url = self.info.get('pic')
                 if not url:
                     raise RuntimeError('没有封面地址')
-                name = 'cover_' + stem + '.jpg'
-                response = session.get(url, timeout=25)
+                response = session.get(url, timeout=60)
                 response.raise_for_status()
                 content = response.content
-                mime = 'image/jpeg'
+                # 按真实格式保存：动图封面常为 animated webp，不能硬写成 .jpg
+                ctype = (response.headers.get('Content-Type') or '').lower()
+                head = content[:16]
+                if head.startswith(b'GIF8') or 'gif' in ctype:
+                    ext, mime = 'gif', 'image/gif'
+                elif head[0:4] == b'RIFF' and b'WEBP' in head[:16] or 'webp' in ctype:
+                    ext, mime = 'webp', 'image/webp'
+                elif head.startswith(b'\x89PNG'):
+                    ext, mime = 'png', 'image/png'
+                elif 'jpeg' in ctype or 'jpg' in ctype or head[:2] == b'\xff\xd8':
+                    ext, mime = 'jpg', 'image/jpeg'
+                else:
+                    # URL 后缀兜底
+                    low = (url or '').lower().split('?')[0]
+                    if low.endswith('.webp'):
+                        ext, mime = 'webp', 'image/webp'
+                    elif low.endswith('.gif'):
+                        ext, mime = 'gif', 'image/gif'
+                    elif low.endswith('.png'):
+                        ext, mime = 'png', 'image/png'
+                    else:
+                        ext, mime = 'jpg', 'image/jpeg'
+                name = 'cover_%s.%s' % (stem, ext)
             elif mode == '弹幕 XML':
                 url = 'https://comment.bilibili.com/%s.xml' % selected.get('cid')
                 response = session.get(url, timeout=25)
@@ -699,7 +760,8 @@ class AppRoot(BoxLayout):
                     ui(lambda v=value: setattr(self.log_lbl, 'text', v))
                 path = download_video(part_info, cookie, quality, out,
                                       progress=prog, cancel=self.cancel, log=log)
-                # 与原版行为保持一致：Android 上每个分P完成后导出到 Download。
+                # 下载完成后导出到 Download 一次，并把 content_uri 记入历史，避免再次「导出」重复复制
+                content_uri = ''
                 if platform == 'android':
                     from jnius import autoclass
                     PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -710,7 +772,9 @@ class AppRoot(BoxLayout):
                         raise RuntimeError(
                             '第 %d P 已下载到应用内部，但导出到手机 Download 失败：%s'
                             % (page_num, exported))
-                self._add_history(os.path.basename(path), path, 'video/mp4')
+                    content_uri = exported
+                self._add_history(os.path.basename(path), path, 'video/mp4',
+                                  content_uri=content_uri)
                 completed += 1
             ui(lambda c=completed, n=count: setattr(
                 self.status, 'text', '下载完成：成功 %d/%d 个分P。' % (c, n)))
@@ -732,10 +796,11 @@ class AppRoot(BoxLayout):
             self.parse_btn.disabled = False
 
     # ---------------------------- history --------------------------------
-    def _add_history(self, name, path, mime):
+    def _add_history(self, name, path, mime, content_uri=''):
         self.history = [h for h in self.history if h.get('path') != path]
         self.history.insert(0, {
             'name': name, 'path': path, 'mime': mime,
+            'content_uri': content_uri or '',
             'created': int(time.time()),
             'title': (self.info or {}).get('title', name),
         })
@@ -743,83 +808,178 @@ class AppRoot(BoxLayout):
         self._save_json('history.json', self.history)
 
     def _history_page(self):
-        sc = ScrollView()
-        col = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
+        sc = ScrollView(do_scroll_x=False)
+        col = BoxLayout(orientation='vertical', spacing=dp(12),
+                        size_hint_y=None, padding=[0, 0, 0, dp(12)])
         col.bind(minimum_height=col.setter('height'))
-        col.add_widget(self._label('已下载', 20, DARK, 38, True))
-        col.add_widget(self._label(
-            '视频下载完成后会自动保存到手机 Download/bilibilidl，'
-            '无需申请存储权限。应用内保留副本用于历史记录。',
-            12, MUTED, 48))
+        col.add_widget(self._label('已下载', 24, DARK, 38, True))
+        tip = CardBox(size_hint_y=None, height=dp(72))
+        tip.add_widget(self._label(
+            '下载完成已自动保存到 Download/bilibilidl，无需再导出。点「打开」直接观看。',
+            14, MUTED, 48))
+        col.add_widget(tip)
         if not self.history:
-            col.add_widget(self._label('还没有下载记录。', 14, MUTED, 60))
+            empty = CardBox(size_hint_y=None, height=dp(120))
+            empty.add_widget(self._label('还没有下载记录', 18, DARK, 44,
+                                         bold=True, halign='center'))
+            empty.add_widget(self._label('在主页解析并下载后会出现在这里', 14, MUTED, 32,
+                                         halign='center'))
+            col.add_widget(empty)
         for item in self.history:
-            card = BoxLayout(orientation='vertical', padding=dp(10),
-                             spacing=dp(5), size_hint_y=None, height=dp(112))
-            card.add_widget(self._label(item.get('name', '文件'), 14, DARK, 28, True))
-            card.add_widget(self._label(item.get('title', ''), 11, MUTED, 24))
-            row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
-            exp = RoundButton(text='导出到手机', bg=PINK)
-            exp.bind(on_release=lambda _, it=item: self.export_file(it))
-            delete = RoundButton(text='删除记录', bg=PALE, fg=PINK)
-            delete.bind(on_release=lambda _, it=item: self.delete_history(it))
-            row.add_widget(exp)
-            row.add_widget(delete)
+            path = item.get('path') or ''
+            exists = os.path.isfile(path)
+            has_uri = bool(item.get('content_uri'))
+            card = CardBox(size_hint_y=None, height=dp(140), spacing=dp(8))
+            name = item.get('name', '文件')
+            title = item.get('title', '') or name
+            card.add_widget(self._label(name, 16, DARK, 28, True))
+            if not exists and not has_uri:
+                sub = '文件缺失，请重新下载'
+                sub_color = PINK
+            elif has_uri or exists:
+                sub = (title if title != name else '已保存在 Download/bilibilidl')
+                sub_color = MUTED
+            else:
+                sub = title
+                sub_color = MUTED
+            card.add_widget(self._label(sub, 13, sub_color, 24))
+            row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+            open_btn = RoundButton(text='打开', bg=BLUE)
+            open_btn.bind(on_release=lambda _, it=item: self.open_history_file(it))
+            del_btn = RoundButton(text='删除记录', bg=WHITE, fg=PINK)
+            del_btn.bind(on_release=lambda _, it=item: self.delete_history(it))
+            if not exists and not has_uri:
+                open_btn.disabled = True
+            row.add_widget(open_btn)
+            row.add_widget(del_btn)
             card.add_widget(row)
             col.add_widget(card)
         sc.add_widget(col)
         self.body.add_widget(sc)
 
-    def export_file(self, item):
+    def open_history_file(self, item):
+        """打开已下载文件：优先用下载时保存的 content_uri，绝不重复复制。"""
+        mime = item.get('mime') or 'video/mp4'
+        uri = (item.get('content_uri') or '').strip()
         path = item.get('path', '')
-        if not os.path.isfile(path):
-            self._alert('找不到文件，可能已被系统清理。')
-            return
         try:
-            filename = item.get('name', os.path.basename(path))
             if platform == 'android':
+                if uri.startswith('content://'):
+                    self._android_view_uri(uri, mime)
+                    return
+                # 旧记录没有 uri：仅打开一次并写回历史，之后不再复制
+                if not os.path.isfile(path):
+                    self._alert('找不到文件，请重新下载。')
+                    return
+                filename = item.get('name', os.path.basename(path))
                 from jnius import autoclass
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
                 Helper = autoclass('org.bilibilidl.MediaMerger')
-                result = str(Helper.exportToDownloads(PythonActivity.mActivity, path, filename))
+                result = str(Helper.exportToDownloads(
+                    PythonActivity.mActivity, path, filename))
                 if not result.startswith('content://'):
                     raise RuntimeError(result)
+                item['content_uri'] = result
+                self._save_json('history.json', self.history)
+                self._android_view_uri(result, mime)
             else:
-                import shutil
-                target = os.path.join(str(Path.home() / 'Downloads'), filename)
-                shutil.copy2(path, target)
-                result = target
-            self._alert('导出成功：\n' + result)
+                if not os.path.isfile(path):
+                    self._alert('找不到文件')
+                    return
+                import webbrowser
+                webbrowser.open('file://' + path)
         except Exception as e:
-            self._alert('导出失败：' + str(e))
+            self._alert('打开失败：' + str(e))
+
+    def export_file(self, item, open_after=False):
+        """兼容旧调用：下载时已自动保存，这里只提示或打开。"""
+        if item.get('content_uri'):
+            if open_after:
+                self.open_history_file(item)
+            else:
+                self._alert('文件已在 Download/bilibilidl，无需再次保存。')
+            return
+        self.open_history_file(item)
+
+    @run_on_ui_thread
+    def _android_view_uri(self, uri_str, mime='video/mp4'):
+        from jnius import autoclass
+        Intent = autoclass('android.content.Intent')
+        Uri = autoclass('android.net.Uri')
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        intent = Intent(Intent.ACTION_VIEW)
+        intent.setDataAndType(Uri.parse(uri_str), mime)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try:
+            PythonActivity.mActivity.startActivity(intent)
+        except Exception:
+            # 无匹配应用时退回选择器
+            chooser = Intent.createChooser(intent, '打开文件')
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            PythonActivity.mActivity.startActivity(chooser)
 
     def delete_history(self, item):
-        self.history = [h for h in self.history if h.get('path') != item.get('path')]
+        path = item.get('path')
+        # 同时尝试删本地副本
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self.history = [h for h in self.history if h.get('path') != path]
         self._save_json('history.json', self.history)
         self.show_page('history')
 
     # ---------------------------- mine ------------------------------------
     def _mine_page(self):
-        self.body.add_widget(self._label('我的', 22, DARK, 44, True))
-        self.body.add_widget(self._label('bilibilidl · 仅在本机处理登录信息', 13, MUTED, 32))
+        sc = ScrollView(do_scroll_x=False)
+        col = BoxLayout(orientation='vertical', spacing=dp(14),
+                        size_hint_y=None, padding=[0, 0, 0, dp(16)])
+        col.bind(minimum_height=col.setter('height'))
+
+        col.add_widget(self._label('我的', 24, DARK, 38, True))
+
+        # 账号卡片
+        acc = CardBox(size_hint_y=None, height=dp(150), spacing=dp(8))
         if self.account:
-            self.body.add_widget(self._label(
-                '账号：%s\nUID：%s\nVIP 类型：%s' % (
-                    self.account.get('uname', 'B站用户'),
+            acc.add_widget(self._label(
+                self.account.get('uname', 'B站用户'), 18, DARK, 32, True))
+            acc.add_widget(self._label(
+                'UID  %s    VIP  %s' % (
                     self.account.get('mid', '未知'),
-                    self.account.get('vipType', 0)), 15, DARK, 80))
-            b = RoundButton(text='退出登录并清除 Cookie', bg=PALE, fg=PINK,
-                            size_hint_y=None, height=dp(48))
-            b.bind(on_release=lambda *_: self.logout())
-            self.body.add_widget(b)
+                    self.account.get('vipType', 0)), 14, MUTED, 28))
+            out = RoundButton(text='退出登录', bg=WHITE, fg=PINK,
+                              size_hint_y=None, height=dp(44))
+            out.bind(on_release=lambda *_: self.logout())
+            acc.add_widget(out)
         else:
-            b = RoundButton(text='B站一键登录', size_hint_y=None, height=dp(48))
-            b.bind(on_release=lambda *_: self.show_login())
-            self.body.add_widget(b)
-        self.body.add_widget(self._label(
-            '说明：画质由 B 站接口实际返回结果决定；登录不代表拥有大会员专属权益。',
-            12, MUTED, 60))
-        self.body.add_widget(Label(font_name=APP_FONT))
+            acc.add_widget(self._label('未登录', 18, DARK, 32, True))
+            acc.add_widget(self._label(
+                '登录后可解析更高画质（以接口返回为准）', 14, MUTED, 28))
+            login = RoundButton(text='B站一键登录', size_hint_y=None, height=dp(46))
+            login.bind(on_release=lambda *_: self.show_login())
+            acc.add_widget(login)
+        col.add_widget(acc)
+
+        # 功能说明
+        help_card = CardBox(size_hint_y=None, height=dp(150), spacing=dp(6))
+        help_card.add_widget(self._label('使用说明', 16, DARK, 28, True))
+        help_card.add_widget(self._label(
+            '· 在线播放：应用内打开官方播放器，不整段缓存\n'
+            '· 下载：保存到 Download/bilibilidl\n'
+            '· 登录仅保存在本机，可随时退出清除',
+            14, MUTED, 100))
+        col.add_widget(help_card)
+
+        note = CardBox(size_hint_y=None, height=dp(88))
+        note.add_widget(self._label(
+            '画质由 B 站接口实际返回结果决定；登录不代表拥有大会员专属权益。',
+            14, MUTED, 64))
+        col.add_widget(note)
+
+        sc.add_widget(col)
+        self.body.add_widget(sc)
 
     # ---------------------------- login -----------------------------------
     def show_login(self):
