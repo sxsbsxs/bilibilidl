@@ -2,7 +2,6 @@
 """bilibilidl: native Android-oriented Bilibili downloader UI."""
 import os
 import io
-import re
 import json
 import time
 import threading
@@ -10,19 +9,16 @@ from pathlib import Path
 
 import requests
 import qrcode
-from PIL import Image as PILImage, ImageFile
 
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.metrics import dp
 from kivy.utils import platform
 from kivy.core.window import Window
-from kivy.core.clipboard import Clipboard
 from kivy.core.text import LabelBase
 from kivy.core.image import Image as CoreImage
 from kivy.uix.image import Image
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
@@ -32,7 +28,7 @@ from kivy.uix.progressbar import ProgressBar
 from kivy.uix.popup import Popup
 from kivy.graphics import Color, RoundedRectangle
 
-from bili_api import (new_session, get_video_info, get_play_info, format_duration)
+from bili_api import new_session, get_video_info, get_play_info, format_duration
 from login_manager import qr_generate, qr_poll, validate_login
 from downloader import download_video, preload_merger
 
@@ -41,10 +37,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_cjk_font():
-    # 首选随 APK 一起打包的完整 Noto CJK 字体；不要依赖 Roboto 的中文覆盖。
     preferred = [
         'NotoSansCJKsc-Regular.ttf', 'NotoSansCJKsc-Regular.otf',
-        'NotoSansCJK-Regular.ttc',
         'NotoSansSC-Regular.ttf', 'NotoSansSC-Regular.otf',
         'NotoSansSC.ttf', 'NotoSansSC[wght].ttf',
     ]
@@ -52,24 +46,13 @@ def _find_cjk_font():
     for folder in folders:
         for name in preferred:
             path = os.path.join(folder, name)
-            if os.path.isfile(path) and os.path.getsize(path) > 0:
-                return path
-    # 兼容用户没有把字体放进项目的情况，尝试 Android 系统中文字体。
-    if platform == 'android':
-        for path in (
-            '/system/fonts/NotoSansCJK-Regular.ttc',
-            '/system/fonts/NotoSansCJKsc-Regular.otf',
-            '/system/fonts/DroidSansFallback.ttf',
-        ):
-            if os.path.isfile(path) and os.path.getsize(path) > 0:
+            if os.path.isfile(path):
                 return path
     for folder in folders:
         try:
             for name in sorted(os.listdir(folder)):
-                if name.lower().endswith(('.ttf', '.otf', '.ttc')):
-                    path = os.path.join(folder, name)
-                    if os.path.isfile(path) and os.path.getsize(path) > 0:
-                        return path
+                if name.lower().endswith(('.ttf', '.otf')):
+                    return os.path.join(folder, name)
         except OSError:
             pass
     return None
@@ -78,21 +61,18 @@ def _find_cjk_font():
 APP_FONT = 'Roboto'
 APP_FONT_BOLD = 'Roboto'
 _font_path = _find_cjk_font()
-_FONT_LOADED = False
 if _font_path:
     try:
         LabelBase.register(name='BiliPinkCJK', fn_regular=_font_path)
         APP_FONT = APP_FONT_BOLD = 'BiliPinkCJK'
-        _FONT_LOADED = True
-        print('[bilibilidl] 中文字体加载成功: %s' % _font_path)
-    except Exception as exc:
-        print('[bilibilidl] 中文字体注册失败: %s' % repr(exc))
-else:
-    print('[bilibilidl] 严重警告：没有找到中文字体；请将 NotoSansCJKsc-Regular.ttf 放在 main.py 同目录。')
+    except Exception:
+        APP_FONT = APP_FONT_BOLD = 'Roboto'
 try:
     SpinnerOption.font_name = APP_FONT
 except Exception:
     pass
+print('[bilibilidl] 字体路径: %s' % _font_path if _font_path else
+      '[bilibilidl] 未找到中文字体文件，使用 Roboto（中文将显示为方块）')
 
 PINK = (0.94, 0.29, 0.52, 1)
 PALE = (1, 0.94, 0.97, 1)
@@ -174,16 +154,11 @@ class AppRoot(BoxLayout):
         self.cancel = threading.Event()
         self.login_cancel = threading.Event()
         self.login_popup = None
-        self._pending_export_path = None
-        self._pending_export_name = None
-        self._export_request_code = 7301
-        self._activity_result_bound = False
         self.account = self._load_json('account.json', None)
         self.history = self._load_json('history.json', [])
-        self.current_page = 'download'
+        self.current_page = 'home'
         self._build()
-        self.show_page('download')
-        self._bind_activity_result()
+        self.show_page('home')
 
     def _label(self, text, size=14, color=DARK, height=None,
                bold=False, halign='left'):
@@ -195,18 +170,6 @@ class AppRoot(BoxLayout):
         w = Label(**kw)
         w.bind(size=lambda obj, val: setattr(
             obj, 'text_size', (max(1, val[0]), None)))
-        return w
-
-    def _auto_label(self, text, size=14, color=DARK, bold=False):
-        """Wrapped label whose height follows its text to avoid overlap on phones."""
-        w = Label(text=str(text), font_name=APP_FONT, font_size=dp(size),
-                  color=color, bold=bold, halign='left', valign='top',
-                  size_hint_y=None)
-        def fit_width(widget, _value):
-            widget.text_size = (max(1, widget.width), None)
-        def fit_height(widget, texture_size):
-            widget.height = max(dp(size + 8), texture_size[1] + dp(10))
-        w.bind(size=fit_width, texture_size=fit_height)
         return w
 
     def _load_json(self, name, default):
@@ -242,7 +205,7 @@ class AppRoot(BoxLayout):
         self.body = BoxLayout(orientation='vertical', spacing=dp(8))
         self.add_widget(self.body)
         nav = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
-        for text, page in [('解析/下载', 'download'), ('已下载', 'history'),
+        for text, page in [('主页', 'home'), ('已下载', 'history'),
                            ('我的', 'mine')]:
             b = RoundButton(text=text, bg=PALE, fg=PINK)
             b.bind(on_release=lambda _, p=page: self.show_page(p))
@@ -252,7 +215,7 @@ class AppRoot(BoxLayout):
     def show_page(self, page):
         self.current_page = page
         self.body.clear_widgets()
-        if page in ('home', 'download'):
+        if page == 'home':
             self._home_page()
         elif page == 'history':
             self._history_page()
@@ -261,7 +224,6 @@ class AppRoot(BoxLayout):
 
     def _home_page(self):
         sc = ScrollView()
-        self.parse_scroll = sc
         col = BoxLayout(orientation='vertical', spacing=dp(10),
                         size_hint_y=None)
         col.bind(minimum_height=col.setter('height'))
@@ -275,26 +237,19 @@ class AppRoot(BoxLayout):
             foreground_color=DARK, background_normal='',
             background_active='', background_color=PALE, cursor_color=PINK)
         col.add_widget(self.url_input)
-        row = BoxLayout(size_hint_y=None, height=dp(96), spacing=dp(8))
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         self.parse_btn = RoundButton(text='解析视频')
         self.parse_btn.bind(on_release=lambda *_: self.parse_async())
         row.add_widget(self.parse_btn)
-        self.cover = make_image(size_hint_x=None, size_hint_y=None, width=dp(116), height=dp(88))
+        self.cover = make_image(size_hint_x=None, width=dp(80))
         row.add_widget(self.cover)
         col.add_widget(row)
-        self.title_lbl = self._auto_label('解析后显示标题和视频信息', 17, DARK, True)
+        self.title_lbl = self._label('解析后显示标题和视频信息',
+                                     15, DARK, 48, True)
         col.add_widget(self.title_lbl)
-        self.meta_lbl = self._auto_label(
-            '画质会按接口返回的实际可用列表显示。', 13, MUTED)
+        self.meta_lbl = self._label(
+            '画质会按接口返回的实际可用列表显示。', 12, MUTED, 56)
         col.add_widget(self.meta_lbl)
-        self.original_btn = RoundButton(
-            text='▶ 原视频，直接观看', size_hint_y=None, height=dp(50), bg=PALE, fg=PINK)
-        self.original_btn.disabled = True
-        self.original_btn.bind(on_release=lambda *_: self._open_original_video())
-        col.add_widget(self.original_btn)
-        col.add_widget(self._label(
-            '通过系统浏览器或 B 站应用打开官方视频页播放，避免内嵌播放器兼容性报错。',
-            12, MUTED, 42))
         col.add_widget(self._label('分P选择', 13, MUTED, 24))
         self.part_spinner = Spinner(
             text='请先解析视频', values=(), font_name=APP_FONT,
@@ -322,147 +277,13 @@ class AppRoot(BoxLayout):
                                     size_hint_y=None, height=dp(8))
         col.add_widget(self.progress)
         self.status = self._label(
-            '下载先保存在应用内部，不会自动复制到相册；需要时可在“已下载”中选择保存位置。',
+            '下载文件先保存在应用私有目录，可在“已下载”中导出。',
             12, MUTED, 52)
         col.add_widget(self.status)
         self.log_lbl = self._label('', 11, MUTED, 68)
         col.add_widget(self.log_lbl)
         sc.add_widget(col)
         self.body.add_widget(sc)
-
-    # ---------------------------- embedded player -------------------------
-    def _open_original_video(self):
-        """Play Bilibili's official embedded player inside the current Android app."""
-        info = getattr(self, 'info', None) or {}
-        bvid = str(info.get('bvid') or '').strip()
-        aid = str(info.get('aid') or '').strip()
-        if not bvid and not aid:
-            self._alert('请先成功解析视频，再打开原视频。')
-            return
-        if bvid:
-            player_url = ('https://player.bilibili.com/player.html?bvid=%s'
-                          '&autoplay=0&high_quality=1' % bvid)
-        else:
-            player_url = ('https://player.bilibili.com/player.html?aid=%s'
-                          '&autoplay=0&high_quality=1' % aid)
-        if platform != 'android':
-            self._open_video_url(player_url)
-            return
-        try:
-            from jnius import autoclass, PythonJavaClass, java_method
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            WebView = autoclass('android.webkit.WebView')
-            WebViewClient = autoclass('android.webkit.WebViewClient')
-            WebChromeClient = autoclass('android.webkit.WebChromeClient')
-            FrameLayout = autoclass('android.widget.FrameLayout')
-            Button = autoclass('android.widget.Button')
-            ViewGroup = autoclass('android.view.ViewGroup$LayoutParams')
-            Gravity = autoclass('android.view.Gravity')
-            Color = autoclass('android.graphics.Color')
-            BuildVersion = autoclass('android.os.Build$VERSION')
-            CookieManager = autoclass('android.webkit.CookieManager')
-            activity = PythonActivity.mActivity
-
-            # Reuse the same WebView on subsequent opens. Repeatedly destroying
-            # WebView handlers was the source of Looper.mQueue crashes on some devices.
-            root = getattr(self, '_inline_player_root', None)
-            web = getattr(self, '_inline_player_web', None)
-            if root is not None and web is not None:
-                try:
-                    root.setVisibility(0)  # View.VISIBLE
-                    web.loadUrl(player_url)
-                    root.bringToFront()
-                    return
-                except Exception:
-                    # Stale Activity after a lifecycle change: discard Python refs,
-                    # but do not call destroy() on a WebView with a dead Handler.
-                    self._inline_player_root = None
-                    self._inline_player_web = None
-                    self._inline_player_listener = None
-
-            root = FrameLayout(activity)
-            root.setBackgroundColor(Color.BLACK)
-            web = WebView(activity)
-            settings = web.getSettings()
-            settings.setJavaScriptEnabled(True)
-            settings.setDomStorageEnabled(True)
-            settings.setMediaPlaybackRequiresUserGesture(True)
-            settings.setLoadsImagesAutomatically(True)
-            settings.setSupportZoom(False)
-            if int(BuildVersion.SDK_INT) >= 21:
-                settings.setMixedContentMode(0)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(web, True)
-            web.setBackgroundColor(Color.BLACK)
-            web.setWebViewClient(WebViewClient())
-            web.setWebChromeClient(WebChromeClient())
-            root.addView(web, FrameLayout.LayoutParams(
-                ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
-
-            close_btn = Button(activity)
-            close_btn.setText('返回应用  ×')
-            close_btn.setTextColor(Color.WHITE)
-            close_btn.setBackgroundColor(Color.rgb(220, 45, 105))
-            density = float(activity.getResources().getDisplayMetrics().density)
-            params = FrameLayout.LayoutParams(
-                int(116 * density), int(46 * density), Gravity.TOP | Gravity.RIGHT)
-            params.topMargin = int(28 * density)
-            params.rightMargin = int(10 * density)
-            root.addView(close_btn, params)
-
-            class _CloseListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
-                __javacontext__ = 'app'
-                def __init__(self, owner):
-                    super().__init__()
-                    self.owner = owner
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    # Only hide the overlay. Do not destroy WebView/Handler here.
-                    try:
-                        self.owner._inline_player_root.setVisibility(8)  # View.GONE
-                    except Exception:
-                        Clock.schedule_once(lambda _dt: self.owner._hide_inline_player(), 0)
-
-            listener = _CloseListener(self)
-            close_btn.setOnClickListener(listener)
-            self._inline_player_root = root
-            self._inline_player_web = web
-            self._inline_player_activity = activity
-            self._inline_player_listener = listener
-            activity.addContentView(root, ViewGroup.LayoutParams(
-                ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
-            web.loadUrl(player_url)
-        except Exception as exc:
-            print('[bilibilidl] 内嵌播放器启动失败: %s' % repr(exc))
-            self._alert('应用内播放器启动失败：%s' % str(exc)[:160])
-
-    def _hide_inline_player(self):
-        """Hide, rather than destroy, the WebView to avoid invalid Looper handlers."""
-        root = getattr(self, '_inline_player_root', None)
-        if root is not None:
-            try:
-                root.setVisibility(8)  # Android View.GONE
-            except Exception as exc:
-                print('[bilibilidl] 隐藏播放器失败：%s' % repr(exc))
-
-    def _close_inline_player(self):
-        # Compatibility name used by lifecycle callbacks: keep WebView alive and hide it.
-        self._hide_inline_player()
-
-    def _open_video_url(self, url):
-        try:
-            if platform == 'android':
-                from jnius import autoclass
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                Uri = autoclass('android.net.Uri')
-                intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                PythonActivity.mActivity.startActivity(intent)
-            else:
-                import webbrowser
-                webbrowser.open(url)
-        except Exception as e:
-            self._alert('无法打开 B 站播放器：' + str(e))
 
     # ---------------------------- parse ---------------------------------
     def parse_async(self):
@@ -475,11 +296,6 @@ class AppRoot(BoxLayout):
         self.busy = True
         self.parse_btn.disabled = True
         self.status.text = '正在请求 B 站视频信息…'
-        try:
-            self.cover.texture = None
-            self.original_btn.disabled = True
-        except Exception:
-            pass
         threading.Thread(target=self._parse_worker, args=(text,),
                          daemon=True).start()
 
@@ -496,44 +312,27 @@ class AppRoot(BoxLayout):
                 first['duration'] = pages[0].get('duration', info.get('duration', 0))
             play = get_play_info(session, first, cookie)
             data = play['data']
-            # Use the API helper's merged quality map instead of zip()'ing two
-            # server arrays (some Bilibili responses have mismatched lengths).
-            merged_qualities = play.get('qualities') or {}
+            accepted = data.get('accept_quality') or []
+            descriptions = data.get('accept_description') or []
             qlist = []
-            if isinstance(merged_qualities, dict):
-                for q, desc in sorted(merged_qualities.items(), key=lambda item: int(item[0]), reverse=True):
-                    try:
-                        qlist.append((int(q), str(desc or ('%sP' % q))))
-                    except (TypeError, ValueError):
-                        continue
+            logged_in = self._logged_in()
+            for q, d in zip(accepted, descriptions):
+                q = int(q)
+                if q >= 80 and not logged_in:
+                    continue
+                qlist.append((q, str(d)))
             if not qlist:
-                accepted = data.get('accept_quality') or []
-                descriptions = data.get('accept_description') or []
-                for index, q in enumerate(accepted):
-                    try:
-                        q = int(q)
-                    except (TypeError, ValueError):
-                        continue
-                    desc = descriptions[index] if index < len(descriptions) else ''
-                    qlist.append((q, str(desc or ('%sP' % q))))
-            if not qlist:
-                seen = set()
                 for item in (data.get('dash') or {}).get('video', []):
-                    try:
-                        q = int(item.get('id', 0))
-                    except (TypeError, ValueError):
+                    q = int(item.get('id', 0))
+                    if q >= 80 and not logged_in:
                         continue
-                    if q and q not in seen:
-                        qlist.append((q, '%sP' % q))
-                        seen.add(q)
+                    qlist.append((q, str(q) + 'P'))
             if not qlist and data.get('durl'):
                 qlist = [(0, '自动 / 当前可用画质')]
             self.info = info
             self.play = play
             self.qualities = qlist
-            # Guard the UI callback too: exceptions raised on Kivy's main thread
-            # do not reach the worker's try/except and can terminate the app.
-            ui(lambda info=info, qlist=qlist: self._safe_parse_done(info, qlist))
+            ui(lambda: self._parse_done(info, qlist))
         except Exception as e:
             err = str(e)
             ui(lambda err=err: self._alert('解析失败：' + err))
@@ -541,28 +340,8 @@ class AppRoot(BoxLayout):
             self.busy = False
             ui(self._enable)
 
-    def _safe_parse_done(self, info, qlist):
-        """Prevent a malformed legacy video/thumbnail UI update from crashing the app."""
-        try:
-            self._parse_done(info, qlist)
-        except Exception as exc:
-            import traceback
-            traceback.print_exc()
-            # Keep parsing results usable even if one optional UI widget fails.
-            try:
-                title = str(info.get('title') or '未知标题')
-                if hasattr(self, 'title_lbl'):
-                    self.title_lbl.text = title
-                if hasattr(self, 'status'):
-                    self.status.text = '视频信息已获取，但界面显示部分内容失败；可继续重试。'
-                if hasattr(self, 'meta_lbl'):
-                    self.meta_lbl.text = '封面为可选内容；若未显示，不影响下载。'
-            except Exception:
-                pass
-
     def _parse_done(self, info, qlist):
-        self.title_lbl.text = str(info.get('title') or '未知标题')
-        self.original_btn.disabled = not bool(info.get('bvid') or info.get('aid'))
+        self.title_lbl.text = str(info.get('title', '未知标题'))
         pages = info.get('pages') or []
         if not pages:
             pages = [{
@@ -581,15 +360,12 @@ class AppRoot(BoxLayout):
         labels = ['全部分P（%d个）' % len(pages)] + self._page_labels
         self.part_spinner.values = labels
         self.part_spinner.text = labels[1] if len(pages) == 1 else labels[0]
-        description = ' '.join(str(info.get('description') or '').split())
-        if len(description) > 180:
-            description = description[:180] + '…'
         self.meta_lbl.text = (
-            'UP主：%s\n总时长：%s\n播放：%s  点赞：%s\n简介：%s' % (
+            'UP主：%s  |  总时长：%s\n播放：%s  弹幕：%s  点赞：%s\n%s' % (
                 info.get('owner', '未知'),
                 format_duration(info.get('duration', 0)),
-                info.get('view', 0), info.get('like', 0),
-                description or '无简介'))
+                info.get('view', 0), info.get('danmaku', 0),
+                info.get('like', 0), (info.get('description') or '')[:120]))
         qlabels = ['%s（%s）' % (desc, q) for q, desc in qlist]
         self.quality_spinner.values = qlabels
         self.quality_spinner.text = qlabels[0] if qlabels else '无可用画质'
@@ -601,245 +377,30 @@ class AppRoot(BoxLayout):
         except Exception:
             pass
         self.status.text = (
-            '解析成功：%d 个分P，B站接口返回 %d 个画质选项。' %
+            '解析成功：%d 个分P，%d 个当前可用画质。' %
             (len(pages), len(qlist))) + (
-            ' 当前未登录；实际可播放/下载的最高画质由 B 站接口权限决定。'
-            if not self._logged_in() else ' 已登录。')
+            ' 未登录仅显示 720P 及以下。' if not self._logged_in()
+            else ' 登录状态已启用。')
         self.progress.value = 0
-        # Bring the parsed title/metadata into view after the network request finishes.
-        try:
-            Clock.schedule_once(lambda _dt: self.parse_scroll.scroll_to(self.title_lbl, padding=dp(18), animate=False), 0.15)
-        except Exception:
-            pass
         if info.get('pic'):
-            threading.Thread(target=self._load_cover, args=(info['pic'], info),
+            threading.Thread(target=self._load_cover, args=(info['pic'],),
                              daemon=True).start()
 
-    def _find_page_cover(self, info):
-        """Try multiple Bilibili page variants when an archive has a placeholder pic."""
-        bvid = str(info.get('bvid') or '').strip()
-        aid = str(info.get('aid') or '').strip()
-        page_urls = []
-        if bvid:
-            page_urls.extend([
-                'https://www.bilibili.com/video/' + bvid,
-                'https://m.bilibili.com/video/' + bvid,
-            ])
-        if aid:
-            page_urls.extend([
-                'https://www.bilibili.com/video/av' + aid,
-                'https://m.bilibili.com/video/av' + aid,
-            ])
-        seen_urls = set()
-        headers = {
-            'Referer': 'https://www.bilibili.com/',
-            'User-Agent': ('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
-                           'Chrome/124.0 Mobile Safari/537.36'),
-        }
-        for page_url in page_urls:
-            if page_url in seen_urls:
-                continue
-            seen_urls.add(page_url)
-            try:
-                response = requests.get(page_url, timeout=(5, 8), headers=headers)
-                response.raise_for_status()
-                html = response.text[:2_000_000]
-                # Parse meta tags regardless of attribute order; Bilibili changes markup.
-                for tag in re.findall(r'<meta\b[^>]*>', html, re.I):
-                    prop = re.search(r'(?:property|name|itemprop)=["\']([^"\']+)', tag, re.I)
-                    content = re.search(r'content=["\']([^"\']+)', tag, re.I)
-                    if not prop or not content:
-                        continue
-                    if prop.group(1).lower() not in ('og:image', 'twitter:image', 'image'):
-                        continue
-                    candidate = content.group(1).replace('&amp;', '&').strip()
-                    if candidate.startswith('//'):
-                        candidate = 'https:' + candidate
-                    if candidate.startswith('http') and 'transparent.gif' not in candidate.lower():
-                        return candidate
-                # Some pages embed the cover in initial-state JSON instead of meta tags.
-                patterns = (
-                    r'"(?:cover|pic|coverUrl|og_image)"\s*:\s*"((?:https?:)?\\?/\\?/[^"\\]+)"',
-                    r'"(?:cover|pic|coverUrl|og_image)"\s*:\s*"([^"]+)"',
-                )
-                for pattern in patterns:
-                    for match in re.finditer(pattern, html, re.I):
-                        candidate = match.group(1)
-                        candidate = (candidate.replace('\\/', '/')
-                                            .replace('\\u002F', '/')
-                                            .replace('\\u0026', '&')
-                                            .replace('\\u003A', ':')
-                                            .replace('\\u002E', '.'))
-                        if candidate.startswith('//'):
-                            candidate = 'https:' + candidate
-                        if (candidate.startswith('http') and
-                                'transparent.gif' not in candidate.lower() and
-                                'transparent.png' not in candidate.lower()):
-                            return candidate
-            except Exception as exc:
-                print('[bilibilidl] 老视频网页封面回退失败 %s: %s' % (page_url, repr(exc)))
-        return ''
-
-    def _load_cover(self, url, info=None):
-        """Load a static thumbnail with low memory; retry the video page's og:image."""
-        info = info or {}
-        headers = {
-            'Referer': 'https://www.bilibili.com/',
-            'User-Agent': ('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
-                           'Chrome/124.0 Mobile Safari/537.36'),
-            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        }
-        candidates = []
-        def add_candidate(value):
-            value = str(value or '').strip().replace('&amp;', '&')
-            if value.startswith('//'):
-                value = 'https:' + value
-            elif value.startswith('http://'):
-                value = 'https://' + value[len('http://'):]
-            if not value or 'transparent.gif' in value.lower():
-                return
-            variants = [value]
-            # Bilibili's CDN accepts explicit output formats. Try JPEG thumbnails as
-            # well as the original path, because Android Pillow builds may lack WebP/AVIF.
-            if '@' in value:
-                base = value.split('@', 1)[0]
-                if base and base not in variants:
-                    variants.append(base)
-                for suffix in ('@640w_360h_1c.jpg', '@320w_180h_1c.jpg', '@640w_360h.jpg'):
-                    converted = base + suffix
-                    if converted not in variants:
-                        variants.append(converted)
-            elif value.lower().endswith(('.webp', '.avif')):
-                base = value.rsplit('.', 1)[0]
-                for suffix in ('.jpg', '@640w_360h_1c.jpg', '@320w_180h_1c.jpg'):
-                    converted = base + suffix
-                    if converted not in variants:
-                        variants.append(converted)
-            for candidate in variants:
-                if candidate not in candidates:
-                    candidates.append(candidate)
-        add_candidate(url)
-        # Old archives such as av2 may expose transparent.gif; obtain webpage metadata too.
-        add_candidate(self._find_page_cover(info))
-        last_error = None
-        tried = 0
-        while tried < 8:
-            if tried >= len(candidates):
-                add_candidate(self._find_page_cover(info))
-            if tried >= len(candidates):
-                break
-            target = candidates[tried]
-            tried += 1
-            try:
-                response = requests.get(target, timeout=(6, 12), headers=headers, stream=True)
-                response.raise_for_status()
-                chunks = []
-                total = 0
-                for chunk in response.iter_content(64 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > 12 * 1024 * 1024:
-                        raise ValueError('封面超过 12 MB，已停止读取以保护内存')
-                    chunks.append(chunk)
-                raw = b''.join(chunks)
-                if not raw:
-                    raise ValueError('封面文件为空')
-                ImageFile.LOAD_TRUNCATED_IMAGES = True
-                with PILImage.open(io.BytesIO(raw)) as source:
-                    source.seek(0)  # Animated GIF/WebP: decode only its first frame.
-                    width, height = source.size
-                    if width <= 2 or height <= 2 or width * height > 40_000_000:
-                        raise ValueError('封面尺寸异常或为透明占位图')
-                    rgba = source.convert('RGBA')
-                    alpha = rgba.getchannel('A')
-                    alpha_extrema = alpha.getextrema()
-                    alpha.close()
-                    if alpha_extrema == (0, 0):
-                        rgba.close()
-                        raise ValueError('封面是全透明占位图')
-                    resampling = getattr(PILImage, 'Resampling', PILImage)
-                    lanczos = getattr(resampling, 'LANCZOS', 1)
-                    rgba.thumbnail((640, 400), lanczos)
-                    mask = rgba.getchannel('A')
-                    frame = PILImage.new('RGB', rgba.size, (255, 255, 255))
-                    frame.paste(rgba, mask=mask)
-                    mask.close()
-                    rgba.close()
-                    out = io.BytesIO()
-                    frame.save(out, format='JPEG', quality=82, optimize=True)
-                    image_bytes = out.getvalue()
-                    frame.close()
-                def apply_cover():
-                    try:
-                        widget = getattr(self, 'cover', None)
-                        if widget is not None:
-                            widget.texture = CoreImage(io.BytesIO(image_bytes), ext='jpg').texture
-                            widget.opacity = 1
-                        if getattr(self, 'status', None) is not None:
-                            self.status.text = '解析成功，封面已加载。'
-                    except Exception as exc:
-                        print('[bilibilidl] 封面显示失败（不影响解析/下载）：%s' % repr(exc))
-                ui(apply_cover)
-                return
-            except Exception as exc:
-                last_error = exc
-                print('[bilibilidl] 封面候选加载失败：%s' % repr(exc))
-                # If the API image failed, add webpage metadata as the final fallback.
-                if tried <= 2:
-                    add_candidate(self._find_page_cover(info))
-        message = str(last_error or 'B站没有提供可用的封面图片')[:120]
-        print('[bilibilidl] 封面不可用（不影响解析/下载）：' + message)
-        # Never leave the cover area blank. This is explicitly a fallback poster,
-        # not a claim that the original cover was recovered.
+    def _load_cover(self, url):
         try:
-            from PIL import ImageDraw, ImageFont
-            poster = PILImage.new('RGB', (640, 400), (255, 238, 244))
-            draw = ImageDraw.Draw(poster)
-            font = None
-            if _font_path and os.path.isfile(_font_path):
-                try:
-                    font = ImageFont.truetype(_font_path, 28)
-                except Exception:
-                    font = None
-            if font is None:
-                font = ImageFont.load_default()
-            draw.rounded_rectangle((18, 18, 622, 382), radius=26,
-                                   outline=(235, 90, 140), width=4)
-            draw.text((38, 42), 'bilibilidl', fill=(190, 45, 100), font=font)
-            title = str(info.get('title') or '视频封面暂不可用')
-            lines = []
-            current = ''
-            for char in title:
-                if len(current) >= 18:
-                    lines.append(current)
-                    current = ''
-                current += char
-            if current:
-                lines.append(current)
-            y = 125
-            for line in lines[:4]:
-                draw.text((38, y), line, fill=(70, 55, 65), font=font)
-                y += 42
-            draw.text((38, 320), '原封面暂时无法获取', fill=(120, 90, 105), font=font)
-            out = io.BytesIO()
-            poster.save(out, format='JPEG', quality=82)
-            placeholder_bytes = out.getvalue()
-            poster.close()
-            def apply_placeholder():
-                try:
-                    if getattr(self, 'cover', None) is not None:
-                        self.cover.texture = CoreImage(io.BytesIO(placeholder_bytes), ext='jpg').texture
-                        self.cover.opacity = 1
-                    if getattr(self, 'meta_lbl', None) is not None:
-                        base = self.meta_lbl.text
-                        if '封面状态：' not in base:
-                            self.meta_lbl.text = base + '\n封面状态：原封面暂时无法获取，当前显示提示图。'
-                except Exception as exc:
-                    print('[bilibilidl] 封面占位图显示失败：%s' % repr(exc))
-            ui(apply_placeholder)
-        except Exception as exc:
-            print('[bilibilidl] 创建封面占位图失败：%s' % repr(exc))
+            r = requests.get(url, timeout=15, headers={
+                'Referer': 'https://www.bilibili.com/',
+                'User-Agent': 'Mozilla/5.0'})
+            r.raise_for_status()
+            data = r.content
+            ext = 'png' if r.headers.get('content-type', '').lower().endswith('png') else 'jpg'
+            def apply_cover():
+                if hasattr(self, 'cover'):
+                    self.cover.texture = CoreImage(
+                        io.BytesIO(data), ext=ext).texture
+            ui(apply_cover)
+        except Exception:
+            pass
 
     # ---------------------------- download --------------------------------
     def _downloads_dir(self):
@@ -886,8 +447,10 @@ class AppRoot(BoxLayout):
                              args=(mode,), daemon=True).start()
             return
         quality = self._selected_quality()
-        # Do not hide/block qualities in the app; Bilibili itself decides whether
-        # this account/session can obtain the selected stream.
+        if quality >= 80 and not self._logged_in():
+            self._alert('1080P 及以上画质需要先点击右上角“登录”，使用 B 站授权扫码登录。')
+            self.show_login()
+            return
         self.busy = True
         self.cancel.clear()
         self.dl_btn.disabled = True
@@ -1008,7 +571,7 @@ class AppRoot(BoxLayout):
                     ui(lambda v=value: setattr(self.log_lbl, 'text', v))
                 path = download_video(part_info, cookie, quality, out,
                                       progress=prog, cancel=self.cancel, log=log)
-                # 下载完成时仍自动保存到 Download/bilibilidl；历史页会提醒用户不要重复导出。
+                # 与原版行为保持一致：Android 上每个分P完成后导出到 Download。
                 if platform == 'android':
                     from jnius import autoclass
                     PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -1017,15 +580,13 @@ class AppRoot(BoxLayout):
                         PythonActivity.mActivity, path, os.path.basename(path)))
                     if not exported.startswith('content://'):
                         raise RuntimeError(
-                            '第 %d P 已下载到应用内部，但自动保存到 Download 失败：%s'
+                            '第 %d P 已下载到应用内部，但导出到手机 Download 失败：%s'
                             % (page_num, exported))
                 self._add_history(os.path.basename(path), path, 'video/mp4')
                 completed += 1
             ui(lambda c=completed, n=count: setattr(
-                self.status, 'text', '下载完成：成功 %d/%d 个分P。已自动保存到手机 Download/bilibilidl；通常不需要再导出，避免生成重复副本。' % (c, n)))
+                self.status, 'text', '下载完成：成功 %d/%d 个分P。' % (c, n)))
             ui(lambda: setattr(self.progress, 'value', 100))
-            ui(lambda c=completed: self._alert(
-                '下载完成：%d 个文件。\n\n视频已自动保存到手机 Download/bilibilidl。通常不需要再次导出；如果确实要另存到其他位置，请在“已下载”点击“另存到…”，并选择不同位置/文件名，以免产生重复副本。' % c))
         except Exception as e:
             err = str(e)
             ui(lambda err=err: self._alert('下载失败：' + err))
@@ -1057,8 +618,9 @@ class AppRoot(BoxLayout):
         col.bind(minimum_height=col.setter('height'))
         col.add_widget(self._label('已下载', 20, DARK, 38, True))
         col.add_widget(self._label(
-            '视频下载完成后已自动保存到手机 Download/bilibilidl。若相册/文件管理器已经能看到文件，通常不需要再导出；“另存到…”用于复制到其他位置，重复操作可能产生副本。点击后会打开 Android 系统保存位置选择器。',
-            12, MUTED, 64))
+            '视频下载完成后会自动保存到手机 Download/bilibilidl，'
+            '无需申请存储权限。应用内保留副本用于历史记录。',
+            12, MUTED, 48))
         if not self.history:
             col.add_widget(self._label('还没有下载记录。', 14, MUTED, 60))
         for item in self.history:
@@ -1067,8 +629,8 @@ class AppRoot(BoxLayout):
             card.add_widget(self._label(item.get('name', '文件'), 14, DARK, 28, True))
             card.add_widget(self._label(item.get('title', ''), 11, MUTED, 24))
             row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
-            exp = RoundButton(text='另存到…', bg=PINK)
-            exp.bind(on_release=lambda _, it=item: self._confirm_export_file(it))
+            exp = RoundButton(text='导出到手机', bg=PINK)
+            exp.bind(on_release=lambda _, it=item: self.export_file(it))
             delete = RoundButton(text='删除记录', bg=PALE, fg=PINK)
             delete.bind(on_release=lambda _, it=item: self.delete_history(it))
             row.add_widget(exp)
@@ -1078,124 +640,28 @@ class AppRoot(BoxLayout):
         sc.add_widget(col)
         self.body.add_widget(sc)
 
-    def _bind_activity_result(self):
-        """Bind Android activity results once, for the system document picker."""
-        if platform != 'android' or self._activity_result_bound:
-            return
-        try:
-            from jnius import autoclass
-            activity = autoclass('org.kivy.android.PythonActivity').mActivity
-            activity.bind(on_activity_result=self._on_activity_result)
-            self._activity_result_bound = True
-        except Exception as exc:
-            print('[bilibilidl] 无法绑定系统文件选择器回调: %s' % repr(exc))
-
-    def _confirm_export_file(self, item):
-        """Warn that the downloaded file may already exist in public Downloads."""
-        content = BoxLayout(orientation='vertical', spacing=dp(12), padding=dp(14))
-        if item.get('mime') == 'video/mp4':
-            reminder = ('提醒：视频下载完成时已自动保存到手机 Download/bilibilidl。\n\n'
-                        '如果你只是想在文件管理器里找到它，通常不需要再次导出。继续操作会把文件另存一份到你选择的位置，可能产生重复副本。')
-        else:
-            reminder = ('提醒：封面、弹幕或字幕等附件通常只保存在应用内部。\n\n'
-                        '继续后会打开 Android 系统文件选择器，让你选择保存位置；如果选择了已有文件名，系统可能提示覆盖或创建副本。')
-        content.add_widget(self._auto_label(reminder, 14, DARK))
-        buttons = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10))
-        cancel_btn = RoundButton(text='取消', bg=PALE, fg=PINK)
-        continue_btn = RoundButton(text='继续选择路径', bg=PINK)
-        buttons.add_widget(cancel_btn)
-        buttons.add_widget(continue_btn)
-        content.add_widget(buttons)
-        popup = Popup(title='导出前提醒', content=content, size_hint=(0.9, None),
-                      height=dp(260), auto_dismiss=False)
-        cancel_btn.bind(on_release=lambda *_: popup.dismiss())
-        continue_btn.bind(on_release=lambda *_: (popup.dismiss(), self.export_file(item)))
-        popup.open()
-
     def export_file(self, item):
-        """Use Android's system Save As picker; never silently duplicate exports."""
         path = item.get('path', '')
         if not os.path.isfile(path):
             self._alert('找不到文件，可能已被系统清理。')
             return
-        filename = item.get('name') or os.path.basename(path)
-        mime = item.get('mime') or 'application/octet-stream'
-        if platform == 'android':
-            try:
-                from jnius import autoclass
-                Intent = autoclass('android.content.Intent')
-                activity = autoclass('org.kivy.android.PythonActivity').mActivity
-                self._bind_activity_result()
-                self._pending_export_path = path
-                self._pending_export_name = filename
-                intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
-                intent.addCategory(Intent.CATEGORY_OPENABLE)
-                intent.setType(mime)
-                intent.putExtra(Intent.EXTRA_TITLE, filename)
-                intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                activity.startActivityForResult(intent, self._export_request_code)
-            except Exception as exc:
-                self._pending_export_path = None
-                self._pending_export_name = None
-                self._alert('无法打开系统保存位置选择器：' + str(exc))
-        else:
-            # Development fallback; Android release always uses the system picker.
-            from shutil import copy2
-            target_dir = str(Path.home() / 'Downloads')
-            os.makedirs(target_dir, exist_ok=True)
-            target = os.path.join(target_dir, filename)
-            if os.path.exists(target):
-                stem, ext = os.path.splitext(filename)
-                n = 2
-                while os.path.exists(os.path.join(target_dir, '%s (%d)%s' % (stem, n, ext))):
-                    n += 1
-                target = os.path.join(target_dir, '%s (%d)%s' % (stem, n, ext))
-            copy2(path, target)
-            self._alert('导出成功：\n' + target)
-
-    def _on_activity_result(self, *args):
-        """Copy the selected file to the user-chosen SAF URI in bounded chunks."""
         try:
-            if len(args) < 3:
-                return
-            request_code, result_code, data = args[-3], args[-2], args[-1]
-            if int(request_code) != self._export_request_code:
-                return
-            source = self._pending_export_path
-            filename = self._pending_export_name or 'download'
-            self._pending_export_path = None
-            self._pending_export_name = None
-            if int(result_code) != -1 or data is None:
-                ui(lambda: self._alert('已取消导出，原文件仍保留在应用内部。'))
-                return
-            if not source or not os.path.isfile(source):
-                ui(lambda: self._alert('原文件不存在，无法导出。'))
-                return
-            uri = data.getData()
-            if uri is None:
-                ui(lambda: self._alert('系统没有返回保存位置，导出未完成。'))
-                return
-            from jnius import autoclass
-            activity = autoclass('org.kivy.android.PythonActivity').mActivity
-            resolver = activity.getContentResolver()
-            output = resolver.openOutputStream(uri)
-            if output is None:
-                raise RuntimeError('系统无法打开所选保存位置')
-            try:
-                with open(source, 'rb') as src:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        output.write(bytearray(chunk))
-                output.flush()
-            finally:
-                output.close()
-            ui(lambda: self._alert(
-                '导出成功：\n%s\n\n原文件仍保留在应用内部。若再次导出，请选择不同文件名或位置，以免产生副本。' % filename))
-        except Exception as exc:
-            message = str(exc)
-            ui(lambda message=message: self._alert('导出失败：' + message))
+            filename = item.get('name', os.path.basename(path))
+            if platform == 'android':
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Helper = autoclass('org.bilibilidl.MediaMerger')
+                result = str(Helper.exportToDownloads(PythonActivity.mActivity, path, filename))
+                if not result.startswith('content://'):
+                    raise RuntimeError(result)
+            else:
+                import shutil
+                target = os.path.join(str(Path.home() / 'Downloads'), filename)
+                shutil.copy2(path, target)
+                result = target
+            self._alert('导出成功：\n' + result)
+        except Exception as e:
+            self._alert('导出失败：' + str(e))
 
     def delete_history(self, item):
         self.history = [h for h in self.history if h.get('path') != item.get('path')]
