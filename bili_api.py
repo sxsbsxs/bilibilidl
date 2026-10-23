@@ -102,7 +102,8 @@ def get_video_info(session, url_or_id):
         'danmaku':(view.get('stat') or {}).get('danmaku',0), 'like':(view.get('stat') or {}).get('like',0),
         'coin':(view.get('stat') or {}).get('coin',0), 'favorite':(view.get('stat') or {}).get('favorite',0),
         'reply':(view.get('stat') or {}).get('reply',0), 'pages':pages,
-        'url':'https://www.bilibili.com/video/'+view.get('bvid','')
+        'url':('https://www.bilibili.com/video/' + str(view.get('bvid'))
+               if view.get('bvid') else 'https://www.bilibili.com/video/av' + str(view.get('aid') or re.sub(r'\D', '', ref['id'])))
     }
 
 def _wbi_mixin_key(session):
@@ -204,20 +205,13 @@ def get_play_info(session, info, cookie=''):
                 # Keep the already usable signed response if legacy access is blocked.
                 print('[bilibilidl] 备用画质查询 qn=%s 失败: %s' % (probe_qn, str(exc)[:100]))
 
-    # Preserve the highest-request response as the primary playback payload.
+    # Keep the first response as the primary payload, but show only qualities for
+    # which at least one request actually returned a playable stream. accept_quality
+    # can list theoretical/account-supported tiers while a specific request still
+    # returns only 360P; showing it alone makes the UI misleading.
     data = responses[0]
     quality_map = {}
     for response in responses:
-        accepted = response.get('accept_quality') or []
-        descriptions = response.get('accept_description') or []
-        for index, q in enumerate(accepted):
-            try:
-                q = int(q)
-            except (TypeError, ValueError):
-                continue
-            desc = descriptions[index] if index < len(descriptions) else ''
-            quality_map[q] = str(desc or _quality_label(q))
-        # Some API variants expose stream IDs but omit accept_quality.
         dash = response.get('dash') or {}
         for stream in dash.get('video') or []:
             try:
@@ -225,17 +219,15 @@ def get_play_info(session, info, cookie=''):
             except (TypeError, ValueError):
                 continue
             if q:
-                quality_map.setdefault(q, _quality_label(q))
-        # Some responses provide the actual selected stream in `quality` while
-        # accept_quality is incomplete. Include it only when the response really
-        # contains playable media data; never add the requested qn blindly.
-        try:
-            actual_q = int(response.get('quality') or 0)
-        except (TypeError, ValueError):
-            actual_q = 0
-        if actual_q and (dash.get('video') or response.get('durl')):
-            quality_map.setdefault(actual_q, _quality_label(actual_q))
-    # Sort from highest to lowest for a predictable UI.
+                quality_map[q] = _quality_label(q)
+        # Legacy progressive stream: quality is valid only when durl exists.
+        if response.get('durl'):
+            try:
+                actual_q = int(response.get('quality') or 0)
+            except (TypeError, ValueError):
+                actual_q = 0
+            if actual_q:
+                quality_map[actual_q] = _quality_label(actual_q)
     quality_map = dict(sorted(quality_map.items(), reverse=True))
     if quality_map:
         data['accept_quality'] = list(quality_map.keys())

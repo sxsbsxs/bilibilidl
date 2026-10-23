@@ -408,7 +408,7 @@ class AppRoot(BoxLayout):
             root.addView(close_btn, button_params)
 
             page_btn = Button(activity)
-            page_btn.setText('视频页备用播放')
+            page_btn.setText('切换官方嵌入播放器')
             page_btn.setTextColor(Color.WHITE)
             page_btn.setBackgroundColor(Color.rgb(70, 70, 70))
             page_params = FrameLayout.LayoutParams(
@@ -426,10 +426,15 @@ class AppRoot(BoxLayout):
                     self.page_url = page_url
                 @java_method('(Landroid/view/View;)V')
                 def onClick(self, view):
-                    try:
-                        self.webview.loadUrl(self.page_url)
-                    except Exception as exc:
-                        print('[bilibilidl] 备用视频页加载失败: %s' % repr(exc))
+                    # Pyjnius callbacks may arrive on a Java callback thread. Marshal
+                    # WebView navigation through Kivy's Android UI thread before touching it.
+                    def load_page(_dt):
+                        try:
+                            if self.webview is not None:
+                                self.webview.loadUrl(self.page_url)
+                        except Exception as exc:
+                            print('[bilibilidl] 备用视频页加载失败: %s' % repr(exc))
+                    Clock.schedule_once(load_page, 0)
 
             class _CloseListener(PythonJavaClass):
                 __javainterfaces__ = ['android/view/View$OnClickListener']
@@ -446,21 +451,28 @@ class AppRoot(BoxLayout):
             if bvid:
                 player_url = ('https://player.bilibili.com/player.html?bvid=%s&cid=%s&page=%s'
                               '&autoplay=0&high_quality=1&danmaku=0' % (bvid, cid, page))
-                video_page_url = 'https://www.bilibili.com/video/' + bvid
+                video_page_url = 'https://m.bilibili.com/video/' + bvid
             else:
                 player_url = ('https://player.bilibili.com/player.html?aid=%s&cid=%s&page=%s'
                               '&autoplay=0&high_quality=1&danmaku=0' % (aid, cid, page))
-                video_page_url = 'https://www.bilibili.com/video/av' + aid
+                video_page_url = 'https://m.bilibili.com/video/av' + aid
             self._inline_player_root = root
             self._inline_player_web = web
             self._inline_player_activity = activity
             self._inline_player_listener = _CloseListener(self)
-            self._inline_player_page_listener = _PageListener(web, video_page_url)
+            self._inline_player_page_listener = _PageListener(web, player_url)
             close_btn.setOnClickListener(self._inline_player_listener)
             page_btn.setOnClickListener(self._inline_player_page_listener)
             activity.addContentView(root, ViewGroup.LayoutParams(
                 ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
-            web.loadUrl(player_url)
+            # Load the real Bilibili video page inside this WebView first.
+            # The embedded player is retained as a user-selectable fallback because
+            # some WebView/device combinations refuse player.bilibili.com embeds.
+            try:
+                settings.setUserAgentString('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36')
+            except Exception:
+                pass
+            web.loadUrl(video_page_url)
             try:
                 CookieManager.getInstance().flush()
                 web.requestFocus()
@@ -473,7 +485,20 @@ class AppRoot(BoxLayout):
             self._alert('应用内播放器启动失败：%s' % str(exc)[:120])
 
     def _close_inline_player(self):
-        """Detach and release WebView on Kivy's UI thread; avoid invalid Handler/Looper calls."""
+        """Detach and release WebView on Android's main/UI thread only."""
+        # WebView owns Android Handlers. Calling destroy/stopLoading off the main
+        # Looper can trigger the opaque "Looper.mQueue" NPE on some devices.
+        try:
+            from jnius import autoclass
+            Looper = autoclass('android.os.Looper')
+            if Looper.myLooper() != Looper.getMainLooper():
+                Clock.schedule_once(lambda _dt: self._close_inline_player(), 0)
+                return
+        except Exception as exc:
+            # On non-Android/dev runs there is no Android Looper; continue with
+            # the regular guarded cleanup below.
+            if platform == 'android':
+                print('[bilibilidl] 检查播放器线程失败：%s' % repr(exc))
         web = getattr(self, '_inline_player_web', None)
         root = getattr(self, '_inline_player_root', None)
         # Clear references first so repeated taps / callbacks cannot destroy twice.
@@ -724,13 +749,16 @@ class AppRoot(BoxLayout):
                 # Some pages embed the cover in initial-state JSON instead of meta tags.
                 for pattern in (r'"cover"\s*:\s*"([^"]+)"',
                                 r'"pic"\s*:\s*"([^"]+)"'):
-                    match = re.search(pattern, html, re.I)
-                    if match:
+                    # Legacy archives can repeat pic fields; the first may be the
+                    # transparent placeholder. Scan all candidates and skip it.
+                    for match in re.finditer(pattern, html, re.I):
                         candidate = match.group(1).replace('\\/', '/').replace('\\u002F', '/')
-                        candidate = candidate.replace('\\u0026', '&')
+                        candidate = candidate.replace('\\u0026', '&').replace('\\u003A', ':')
                         if candidate.startswith('//'):
                             candidate = 'https:' + candidate
-                        if candidate.startswith('http') and 'transparent.gif' not in candidate.lower():
+                        if (candidate.startswith('http') and
+                                'transparent.gif' not in candidate.lower() and
+                                'transparent.png' not in candidate.lower()):
                             return candidate
             except Exception as exc:
                 print('[bilibilidl] 老视频网页封面回退失败 %s: %s' % (page_url, repr(exc)))
