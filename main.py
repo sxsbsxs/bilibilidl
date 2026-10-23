@@ -197,7 +197,7 @@ class AppRoot(BoxLayout):
         head.add_widget(Label(font_name=APP_FONT))
         self.login_btn = RoundButton(
             text=(self.account.get('uname', '已登录')
-                  if self.account else 'B站授权登录'),
+                  if self.account else 'B站一键登录'),
             size_hint_x=None, width=dp(130), bg=PALE, fg=PINK)
         self.login_btn.bind(on_release=lambda *_: self.show_login())
         head.add_widget(self.login_btn)
@@ -244,11 +244,20 @@ class AppRoot(BoxLayout):
         self.cover = make_image(size_hint_x=None, width=dp(80))
         row.add_widget(self.cover)
         col.add_widget(row)
+        # 标题与信息区改为自适应高度，长文本不再与下方控件重叠
         self.title_lbl = self._label('解析后显示标题和视频信息',
-                                     15, DARK, 48, True)
+                                     16, DARK, None, True)
+        self.title_lbl.size_hint_y = None
+        self.title_lbl.height = dp(24)
+        self.title_lbl.bind(texture_size=lambda l, s: setattr(
+            l, 'height', s[1] + dp(10)))
         col.add_widget(self.title_lbl)
         self.meta_lbl = self._label(
-            '画质会按接口返回的实际可用列表显示。', 12, MUTED, 56)
+            '画质会按接口返回的实际可用列表显示。', 12, MUTED, None)
+        self.meta_lbl.size_hint_y = None
+        self.meta_lbl.height = dp(24)
+        self.meta_lbl.bind(texture_size=lambda l, s: setattr(
+            l, 'height', s[1] + dp(10)))
         col.add_widget(self.meta_lbl)
         col.add_widget(self._label('分P选择', 13, MUTED, 24))
         self.part_spinner = Spinner(
@@ -365,7 +374,7 @@ class AppRoot(BoxLayout):
                 info.get('owner', '未知'),
                 format_duration(info.get('duration', 0)),
                 info.get('view', 0), info.get('danmaku', 0),
-                info.get('like', 0), (info.get('description') or '')[:120]))
+                info.get('like', 0), (info.get('description') or '')[:300]))
         qlabels = ['%s（%s）' % (desc, q) for q, desc in qlist]
         self.quality_spinner.values = qlabels
         self.quality_spinner.text = qlabels[0] if qlabels else '无可用画质'
@@ -388,19 +397,52 @@ class AppRoot(BoxLayout):
 
     def _load_cover(self, url):
         try:
-            r = requests.get(url, timeout=15, headers={
+            if url.startswith('//'):
+                url = 'https:' + url
+            headers = {
                 'Referer': 'https://www.bilibili.com/',
-                'User-Agent': 'Mozilla/5.0'})
+                'User-Agent': 'Mozilla/5.0'}
+            r = requests.get(url, timeout=15, headers=headers)
             r.raise_for_status()
-            data = r.content
-            ext = 'png' if r.headers.get('content-type', '').lower().endswith('png') else 'jpg'
+            raw = r.content
+            ctype = r.headers.get('content-type', '').lower()
+
+            data, ext = raw, 'jpg'
+            # 用 Pillow 解码：webp / gif 动图统一取第一帧转 PNG，
+            # 避免把动图当 jpg 解码导致主线程异常闪退
+            try:
+                from PIL import Image as PILImage
+                img = PILImage.open(io.BytesIO(raw))
+                img.seek(0)  # 动图只取第一帧
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+                img.thumbnail((640, 640))
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                data, ext = buf.getvalue(), 'png'
+            except Exception as e:
+                print('[bilibilidl] Pillow 解码封面失败: %s (%s)' % (e, ctype))
+                # Pillow 解不了 webp 时，让 B 站图片服务器转出 jpg 再试
+                if 'webp' in ctype or 'gif' in ctype:
+                    r2 = requests.get(url + '@.jpg', timeout=15,
+                                      headers=headers)
+                    r2.raise_for_status()
+                    data, ext = r2.content, 'jpg'
+                elif 'png' in ctype:
+                    ext = 'png'
+
             def apply_cover():
-                if hasattr(self, 'cover'):
-                    self.cover.texture = CoreImage(
-                        io.BytesIO(data), ext=ext).texture
+                try:
+                    cover = getattr(self, 'cover', None)
+                    if cover is not None:
+                        cover.texture = CoreImage(
+                            io.BytesIO(data), ext=ext).texture
+                except Exception as e:
+                    # Clock 回调里的异常会直接闪退，必须兜住
+                    print('[bilibilidl] 封面设置失败: %s' % e)
             ui(apply_cover)
-        except Exception:
-            pass
+        except Exception as e:
+            print('[bilibilidl] 封面下载失败: %s' % e)
 
     # ---------------------------- download --------------------------------
     def _downloads_dir(self):
@@ -683,7 +725,7 @@ class AppRoot(BoxLayout):
             b.bind(on_release=lambda *_: self.logout())
             self.body.add_widget(b)
         else:
-            b = RoundButton(text='B站扫码登录', size_hint_y=None, height=dp(48))
+            b = RoundButton(text='B站一键登录', size_hint_y=None, height=dp(48))
             b.bind(on_release=lambda *_: self.show_login())
             self.body.add_widget(b)
         self.body.add_widget(self._label(
@@ -692,16 +734,72 @@ class AppRoot(BoxLayout):
         self.body.add_widget(Label(font_name=APP_FONT))
 
     # ---------------------------- login -----------------------------------
-    def _make_qr_png(self, url):
-        qr = qrcode.QRCode(box_size=8, border=3)
-        qr.add_data(url)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color='black', back_color='white').convert('RGB')
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        return buf.getvalue()
-
     def show_login(self):
+        """一键登录：调起 B 站 App 确认，无需扫码。非 Android 回退二维码。"""
+        if self.account:
+            self._mine_page_confirm()
+            return
+        if platform != 'android':
+            self.show_login_qr()
+            return
+        if self.busy:
+            return
+        self.busy = True
+        self.login_cancel.set()
+        self.login_cancel = threading.Event()
+        cancel = self.login_cancel
+        threading.Thread(target=self._app_login_worker, args=(cancel,),
+                         daemon=True).start()
+
+    def _app_login_worker(self, cancel):
+        try:
+            session = new_session()
+            url, key = qr_generate(session)  # 同一个登录链接，只是不用生成二维码
+            self._open_bili_app(url)
+            ui(lambda: setattr(self.status, 'text',
+                               '已调起 B 站 App，请在 App 内确认登录…'))
+            end = time.time() + 175
+            while time.time() < end and not cancel.is_set():
+                code, msg = qr_poll(session, key)
+                if cancel.is_set():
+                    return
+                if code == 0:
+                    cookie, profile = validate_login(session)
+                    self._save_account(cookie, profile)
+                    ui(lambda p=profile: self._login_done(p))
+                    return
+                if code == 86038:
+                    ui(lambda: self._alert('登录已过期，请重试'))
+                    return
+                for _ in range(20):
+                    if cancel.is_set():
+                        return
+                    time.sleep(0.1)
+            if not cancel.is_set():
+                ui(lambda: self._alert('登录超时，请重试'))
+        except Exception as e:
+            err = str(e)
+            ui(lambda err=err: self._alert('登录失败：' + err[:90]))
+        finally:
+            self.busy = False
+            ui(self._enable)
+
+    @run_on_ui_thread
+    def _open_bili_app(self, url):
+        try:
+            from jnius import autoclass
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            PythonActivity.mActivity.startActivity(intent)
+        except Exception as e:
+            print('[bilibilidl] 调起 B站 App 失败: %s' % e)
+            ui(self.show_login_qr)  # 兜底：打不开就退回二维码登录
+
+    def show_login_qr(self):
+        """备用登录方式：显示二维码扫码登录。"""
         if self.account:
             self._mine_page_confirm()
             return
@@ -801,12 +899,21 @@ class AppRoot(BoxLayout):
             os.remove(os.path.join(self.app.user_data_dir, 'account.json'))
         except OSError:
             pass
-        self.login_btn.text = 'B站授权登录'
+        self.login_btn.text = 'B站一键登录'
         self.show_page('mine')
         self._alert('已退出登录并清除本地 Cookie。')
 
     def _mine_page_confirm(self):
         self.show_page('mine')
+
+    def _make_qr_png(self, url):
+        qr = qrcode.QRCode(box_size=8, border=3)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color='black', back_color='white').convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return buf.getvalue()
 
     def _alert(self, text):
         def show():
