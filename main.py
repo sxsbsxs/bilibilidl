@@ -293,7 +293,7 @@ class AppRoot(BoxLayout):
         self.original_btn.bind(on_release=lambda *_: self._open_original_video())
         col.add_widget(self.original_btn)
         col.add_widget(self._label(
-            '在 bilibilidl 应用内嵌入 B 站官方播放器；视频由网页播放器流式播放。',
+            '通过系统浏览器或 B 站应用打开官方视频页播放，避免内嵌播放器兼容性报错。',
             12, MUTED, 42))
         col.add_widget(self._label('分P选择', 13, MUTED, 24))
         self.part_spinner = Spinner(
@@ -332,18 +332,21 @@ class AppRoot(BoxLayout):
 
     # ---------------------------- embedded player -------------------------
     def _open_original_video(self):
-        """Show Bilibili's official embedded player in an Android WebView overlay."""
+        """Play Bilibili's official embedded player inside the current Android app."""
         info = getattr(self, 'info', None) or {}
         bvid = str(info.get('bvid') or '').strip()
         aid = str(info.get('aid') or '').strip()
         if not bvid and not aid:
             self._alert('请先成功解析视频，再打开原视频。')
             return
+        if bvid:
+            player_url = ('https://player.bilibili.com/player.html?bvid=%s'
+                          '&autoplay=0&high_quality=1' % bvid)
+        else:
+            player_url = ('https://player.bilibili.com/player.html?aid=%s'
+                          '&autoplay=0&high_quality=1' % aid)
         if platform != 'android':
-            # Desktop/dev fallback only; Android release uses the in-app WebView.
-            url = ('https://player.bilibili.com/player.html?bvid=' + bvid
-                   if bvid else 'https://www.bilibili.com/blackboard/html5player.html?aid=' + aid)
-            self._open_video_url(url)
+            self._open_video_url(player_url)
             return
         try:
             from jnius import autoclass, PythonJavaClass, java_method
@@ -359,82 +362,52 @@ class AppRoot(BoxLayout):
             BuildVersion = autoclass('android.os.Build$VERSION')
             CookieManager = autoclass('android.webkit.CookieManager')
             activity = PythonActivity.mActivity
-            self._close_inline_player()
 
-            # Keep the Android WebView in the same Activity, layered over Kivy.
+            # Reuse the same WebView on subsequent opens. Repeatedly destroying
+            # WebView handlers was the source of Looper.mQueue crashes on some devices.
+            root = getattr(self, '_inline_player_root', None)
+            web = getattr(self, '_inline_player_web', None)
+            if root is not None and web is not None:
+                try:
+                    root.setVisibility(0)  # View.VISIBLE
+                    web.loadUrl(player_url)
+                    root.bringToFront()
+                    return
+                except Exception:
+                    # Stale Activity after a lifecycle change: discard Python refs,
+                    # but do not call destroy() on a WebView with a dead Handler.
+                    self._inline_player_root = None
+                    self._inline_player_web = None
+                    self._inline_player_listener = None
+
             root = FrameLayout(activity)
+            root.setBackgroundColor(Color.BLACK)
             web = WebView(activity)
             settings = web.getSettings()
             settings.setJavaScriptEnabled(True)
             settings.setDomStorageEnabled(True)
-            # The player must be able to start after the user taps its own play control.
-            settings.setMediaPlaybackRequiresUserGesture(False)
+            settings.setMediaPlaybackRequiresUserGesture(True)
             settings.setLoadsImagesAutomatically(True)
-            settings.setJavaScriptCanOpenWindowsAutomatically(True)
-            settings.setSupportMultipleWindows(False)
-            settings.setUseWideViewPort(True)
-            settings.setLoadWithOverviewMode(True)
-            settings.setDefaultTextEncodingName('UTF-8')
-            try:
-                settings.setBuiltInZoomControls(False)
-                settings.setDisplayZoomControls(False)
-                settings.setAllowFileAccess(False)
-            except Exception:
-                pass
-            CookieManager.getInstance().setAcceptCookie(True)
+            settings.setSupportZoom(False)
             if int(BuildVersion.SDK_INT) >= 21:
-                settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW, for legacy embeds
+                settings.setMixedContentMode(0)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(web, True)
             web.setBackgroundColor(Color.BLACK)
             web.setWebViewClient(WebViewClient())
             web.setWebChromeClient(WebChromeClient())
-            try:
-                web.setFocusable(True)
-                web.setFocusableInTouchMode(True)
-            except Exception:
-                pass
             root.addView(web, FrameLayout.LayoutParams(
                 ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
 
             close_btn = Button(activity)
-            close_btn.setText('关闭播放器  ✕')
+            close_btn.setText('返回应用  ×')
             close_btn.setTextColor(Color.WHITE)
             close_btn.setBackgroundColor(Color.rgb(220, 45, 105))
             density = float(activity.getResources().getDisplayMetrics().density)
-            button_params = FrameLayout.LayoutParams(
-                int(132 * density), int(48 * density), Gravity.TOP | Gravity.RIGHT)
-            button_params.topMargin = int(28 * density)
-            button_params.rightMargin = int(10 * density)
-            root.addView(close_btn, button_params)
-
-            page_btn = Button(activity)
-            page_btn.setText('切换官方嵌入播放器')
-            page_btn.setTextColor(Color.WHITE)
-            page_btn.setBackgroundColor(Color.rgb(70, 70, 70))
-            page_params = FrameLayout.LayoutParams(
-                int(148 * density), int(48 * density), Gravity.TOP | Gravity.LEFT)
-            page_params.topMargin = int(28 * density)
-            page_params.leftMargin = int(10 * density)
-            root.addView(page_btn, page_params)
-
-            class _PageListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
-                __javacontext__ = 'app'
-                def __init__(self, webview, page_url):
-                    super().__init__()
-                    self.webview = webview
-                    self.page_url = page_url
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    # Pyjnius callbacks may arrive on a Java callback thread. Marshal
-                    # WebView navigation through Kivy's Android UI thread before touching it.
-                    def load_page(_dt):
-                        try:
-                            if self.webview is not None:
-                                self.webview.loadUrl(self.page_url)
-                        except Exception as exc:
-                            print('[bilibilidl] 备用视频页加载失败: %s' % repr(exc))
-                    Clock.schedule_once(load_page, 0)
+            params = FrameLayout.LayoutParams(
+                int(116 * density), int(46 * density), Gravity.TOP | Gravity.RIGHT)
+            params.topMargin = int(28 * density)
+            params.rightMargin = int(10 * density)
+            root.addView(close_btn, params)
 
             class _CloseListener(PythonJavaClass):
                 __javainterfaces__ = ['android/view/View$OnClickListener']
@@ -444,99 +417,37 @@ class AppRoot(BoxLayout):
                     self.owner = owner
                 @java_method('(Landroid/view/View;)V')
                 def onClick(self, view):
-                    Clock.schedule_once(lambda _dt: self.owner._close_inline_player(), 0)
+                    # Only hide the overlay. Do not destroy WebView/Handler here.
+                    try:
+                        self.owner._inline_player_root.setVisibility(8)  # View.GONE
+                    except Exception:
+                        Clock.schedule_once(lambda _dt: self.owner._hide_inline_player(), 0)
 
-            cid = str(info.get('cid') or '')
-            page = '1'
-            if bvid:
-                player_url = ('https://player.bilibili.com/player.html?bvid=%s&cid=%s&page=%s'
-                              '&autoplay=0&high_quality=1&danmaku=0' % (bvid, cid, page))
-                video_page_url = 'https://m.bilibili.com/video/' + bvid
-            else:
-                player_url = ('https://player.bilibili.com/player.html?aid=%s&cid=%s&page=%s'
-                              '&autoplay=0&high_quality=1&danmaku=0' % (aid, cid, page))
-                video_page_url = 'https://m.bilibili.com/video/av' + aid
+            listener = _CloseListener(self)
+            close_btn.setOnClickListener(listener)
             self._inline_player_root = root
             self._inline_player_web = web
             self._inline_player_activity = activity
-            self._inline_player_listener = _CloseListener(self)
-            self._inline_player_page_listener = _PageListener(web, player_url)
-            close_btn.setOnClickListener(self._inline_player_listener)
-            page_btn.setOnClickListener(self._inline_player_page_listener)
+            self._inline_player_listener = listener
             activity.addContentView(root, ViewGroup.LayoutParams(
                 ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
-            # Load the real Bilibili video page inside this WebView first.
-            # The embedded player is retained as a user-selectable fallback because
-            # some WebView/device combinations refuse player.bilibili.com embeds.
-            try:
-                settings.setUserAgentString('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36')
-            except Exception:
-                pass
-            web.loadUrl(video_page_url)
-            try:
-                CookieManager.getInstance().flush()
-                web.requestFocus()
-                root.bringToFront()
-            except Exception:
-                pass
+            web.loadUrl(player_url)
         except Exception as exc:
             print('[bilibilidl] 内嵌播放器启动失败: %s' % repr(exc))
-            self._close_inline_player()
-            self._alert('应用内播放器启动失败：%s' % str(exc)[:120])
+            self._alert('应用内播放器启动失败：%s' % str(exc)[:160])
+
+    def _hide_inline_player(self):
+        """Hide, rather than destroy, the WebView to avoid invalid Looper handlers."""
+        root = getattr(self, '_inline_player_root', None)
+        if root is not None:
+            try:
+                root.setVisibility(8)  # Android View.GONE
+            except Exception as exc:
+                print('[bilibilidl] 隐藏播放器失败：%s' % repr(exc))
 
     def _close_inline_player(self):
-        """Detach and release WebView on Android's main/UI thread only."""
-        # WebView owns Android Handlers. Calling destroy/stopLoading off the main
-        # Looper can trigger the opaque "Looper.mQueue" NPE on some devices.
-        try:
-            from jnius import autoclass
-            Looper = autoclass('android.os.Looper')
-            if Looper.myLooper() != Looper.getMainLooper():
-                Clock.schedule_once(lambda _dt: self._close_inline_player(), 0)
-                return
-        except Exception as exc:
-            # On non-Android/dev runs there is no Android Looper; continue with
-            # the regular guarded cleanup below.
-            if platform == 'android':
-                print('[bilibilidl] 检查播放器线程失败：%s' % repr(exc))
-        web = getattr(self, '_inline_player_web', None)
-        root = getattr(self, '_inline_player_root', None)
-        # Clear references first so repeated taps / callbacks cannot destroy twice.
-        self._inline_player_web = None
-        self._inline_player_root = None
-        self._inline_player_activity = None
-        self._inline_player_listener = None
-        self._inline_player_page_listener = None
-        try:
-            # All current call sites are UI callbacks (or are scheduled onto Clock).
-            # Do not pass a Python lambda to Activity.runOnUiThread: Pyjnius may fail
-            # to marshal it as java.lang.Runnable and Android can throw Looper.mQueue NPE.
-            parent = root.getParent() if root is not None else None
-            if parent is not None:
-                parent.removeView(root)
-        except Exception as exc:
-            print('[bilibilidl] 移除播放器视图失败: %s' % repr(exc))
-        if web is not None:
-            try:
-                web.stopLoading()
-            except Exception:
-                pass
-            # Do not navigate to about:blank during teardown. WebView.loadUrl() may
-            # post to a Looper whose MessageQueue is already gone during Activity teardown.
-            try:
-                web.setWebChromeClient(None)
-                web.setWebViewClient(None)
-            except Exception:
-                pass
-            try:
-                web.clearHistory()
-                web.removeAllViews()
-            except Exception:
-                pass
-            try:
-                web.destroy()
-            except Exception as exc:
-                print('[bilibilidl] 释放内嵌播放器失败: %s' % repr(exc))
+        # Compatibility name used by lifecycle callbacks: keep WebView alive and hide it.
+        self._hide_inline_player()
 
     def _open_video_url(self, url):
         try:
@@ -747,13 +658,18 @@ class AppRoot(BoxLayout):
                     if candidate.startswith('http') and 'transparent.gif' not in candidate.lower():
                         return candidate
                 # Some pages embed the cover in initial-state JSON instead of meta tags.
-                for pattern in (r'"cover"\s*:\s*"([^"]+)"',
-                                r'"pic"\s*:\s*"([^"]+)"'):
-                    # Legacy archives can repeat pic fields; the first may be the
-                    # transparent placeholder. Scan all candidates and skip it.
+                patterns = (
+                    r'"(?:cover|pic|coverUrl|og_image)"\s*:\s*"((?:https?:)?\\?/\\?/[^"\\]+)"',
+                    r'"(?:cover|pic|coverUrl|og_image)"\s*:\s*"([^"]+)"',
+                )
+                for pattern in patterns:
                     for match in re.finditer(pattern, html, re.I):
-                        candidate = match.group(1).replace('\\/', '/').replace('\\u002F', '/')
-                        candidate = candidate.replace('\\u0026', '&').replace('\\u003A', ':')
+                        candidate = match.group(1)
+                        candidate = (candidate.replace('\\/', '/')
+                                            .replace('\\u002F', '/')
+                                            .replace('\\u0026', '&')
+                                            .replace('\\u003A', ':')
+                                            .replace('\\u002E', '.'))
                         if candidate.startswith('//'):
                             candidate = 'https:' + candidate
                         if (candidate.startswith('http') and
