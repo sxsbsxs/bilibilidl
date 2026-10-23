@@ -9,34 +9,29 @@ source.include_exts = py,png,jpg,jpeg,ttf,ttc,otf,kv,atlas,json,xml,java,txt,md
 source.include_patterns = *.png,*.jpg,*.jpeg,*.ttf,*.ttc,*.otf,*.kv,*.atlas,src/*,assets/*
 source.exclude_dirs = bin,.buildozer,__pycache__,.git
 
-version = 2.5.3
+version = 2.7.0
 
 orientation = portrait
 fullscreen = 0
 
 icon.filename = %(source.dir)s/bilibilidl图标.png
 presplash.filename = %(source.dir)s/bilibilidl加载图.png
-# 启动画面背景改为纯白；应用启动后 main.py 的 style_system_bars() 负责状态栏/导航栏白底深色图标
 android.presplash_color = #FFFFFF
 
-# Python 和界面依赖（p4a 不会自动装依赖的依赖，所以这里全部列出）
-# ffpyplayer：Kivy Video 在 Android 上应用内播放所需
-requirements = python3,kivy==2.2.1,ffpyplayer,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
+requirements = python3,kivy==2.2.1,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
 
-# Android 兼容设置
 android.api = 33
 android.minapi = 24
 android.ndk = 25c
 android.archs = arm64-v8a
 android.accept_sdk_license = True
+android.enable_androidx = True
 
-# Android 源码目录（Java 文件放在 src/org/bilibilidl/MediaMerger.java）
 android.add_src = src
 
-# 权限
+# 应用内播放用系统 WebView 打开官方播放器，无需 ExoPlayer / ffpyplayer
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,WRITE_EXTERNAL_STORAGE
 
-# 调试设置
 android.debuggable = True
 android.logcat_filters = *:S python:D
 

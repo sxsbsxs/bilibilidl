@@ -522,9 +522,7 @@ class AppRoot(BoxLayout):
 
     # ---------------------------- online play -----------------------------
     def start_online_play(self):
-        """全部直接播：缓冲到本地后用系统播放器打开（支持 DASH）。"""
-        if self.busy:
-            return
+        """应用内嵌 B 站官方播放器（WebView），不缓存，画质由官方页决定。"""
         if not self.info:
             self._alert('请先解析视频')
             self.parse_async()
@@ -536,216 +534,54 @@ class AppRoot(BoxLayout):
             return
 
         page = pages[0]
-        part_info = dict(self.info)
-        part_info.update(page)
-        part_info['cid'] = page.get('cid') or self.info.get('cid')
         page_num = int(page.get('page') or 1)
-        part_title = str(page.get('part') or ('P%d' % page_num))
-        part_info['title'] = '%s - P%d %s' % (
-            self.info.get('title', 'B站视频'), page_num, part_title)
-
-        quality = self._selected_quality()
-        if quality >= 80 and not self._logged_in():
-            self._alert('1080P 及以上需要先登录')
-            self.show_login()
+        bvid = (self.info.get('bvid') or '').strip()
+        if not bvid:
+            self._alert('无法获取 BV 号')
             return
 
-        self.busy = True
-        self.cancel.clear()
-        self.play_btn.disabled = True
-        self.dl_btn.disabled = True
-        self.parse_btn.disabled = True
-        self.progress.value = 0
-        self.status.text = '正在准备在线播放…'
-        threading.Thread(
-            target=self._online_play_worker,
-            args=(part_info, quality),
-            daemon=True
-        ).start()
-
-    def _online_play_worker(self, part_info, quality):
-        try:
-            cookie = self.account.get('cookie', '') if self.account else ''
-            tmp_dir = os.path.join(self.app.user_data_dir, 'play_cache')
-            os.makedirs(tmp_dir, exist_ok=True)
-
-            def prog(done, total):
-                pct = int(done * 100 / total) if total else 0
-                done_mb = round(done / 1048576, 1)
-                total_mb = round(total / 1048576, 1) if total else '?'
-                ui(lambda v=pct: setattr(self.progress, 'value', min(v, 99)))
-                ui(lambda d=done_mb, t=total_mb:
-                   setattr(self.status, 'text',
-                           '缓冲中：%s / %s MB' % (d, t)))
-
-            def log(line):
-                ui(lambda v=str(line)[-200:]:
-                   setattr(self.log_lbl, 'text', v))
-
-            # 复用现有下载逻辑（durl / DASH + MediaMerger 合并）
-            path = download_video(
-                part_info, cookie, quality, tmp_dir,
-                progress=prog, cancel=self.cancel, log=log
-            )
-
-            if self.cancel.is_set():
-                raise RuntimeError('已取消')
-
-            ui(lambda: setattr(self.status, 'text', '缓冲完成，正在打开播放器…'))
-            ui(lambda: setattr(self.progress, 'value', 100))
-            ui(lambda p=path: self._open_inapp_player(p))
-        except Exception as e:
-            err = str(e)
-            ui(lambda err=err: self._alert('在线播放失败：' + err))
-            ui(lambda: setattr(self.status, 'text', '在线播放失败'))
-        finally:
-            self.busy = False
-            ui(self._enable_play)
+        cookie = self.account.get('cookie', '') if self.account else ''
+        self.progress.value = 100
+        self.status.text = '正在打开官方播放器…'
+        self._open_bili_webview(bvid, page_num, cookie)
 
     def _enable_play(self):
         if hasattr(self, 'play_btn'):
             self.play_btn.disabled = False
         self._enable()
 
-    def _open_inapp_player(self, path):
-        """应用内全屏播放本地 MP4。"""
-        if not os.path.isfile(path):
-            self._alert('播放文件不存在')
-            return
-
-        # 关闭已有播放器
-        if getattr(self, '_player_popup', None):
-            try:
-                self._close_inapp_player()
-            except Exception:
-                pass
-
-        root = FloatLayout()
-        with root.canvas.before:
-            Color(0, 0, 0, 1)
-            root._bg = Rectangle(pos=root.pos, size=root.size)
-        root.bind(pos=lambda o, v: setattr(o._bg, 'pos', v),
-                  size=lambda o, v: setattr(o._bg, 'size', v))
-
+    @run_on_ui_thread
+    def _open_bili_webview(self, bvid, page_num, cookie):
+        """WebView 打开 https://player.bilibili.com/player.html?bvid=..."""
         try:
-            video = Video(
-                source=path,
-                state='play',
-                options={'allow_stretch': True, 'keep_ratio': True},
-                size_hint=(1, 1),
-                pos_hint={'x': 0, 'y': 0},
-            )
-        except Exception as e:
-            self._alert('无法创建播放器（请确认已打包 ffpyplayer）：' + str(e))
-            return
-
-        # 部分平台需要显式 volume
-        try:
-            video.volume = 1.0
-        except Exception:
-            pass
-
-        root.add_widget(video)
-        self._player_video = video
-
-        # 顶部控制条
-        bar = BoxLayout(
-            orientation='horizontal',
-            size_hint=(1, None),
-            height=dp(52),
-            pos_hint={'top': 1},
-            padding=[dp(10), dp(6)],
-            spacing=dp(8),
-        )
-        with bar.canvas.before:
-            Color(0, 0, 0, 0.55)
-            bar._bg = Rectangle(pos=bar.pos, size=bar.size)
-        bar.bind(pos=lambda o, v: setattr(o._bg, 'pos', v),
-                 size=lambda o, v: setattr(o._bg, 'size', v))
-
-        title = (self.info or {}).get('title', '正在播放')
-        if len(title) > 28:
-            title = title[:28] + '…'
-        bar.add_widget(self._label(title, 14, WHITE, 40, bold=True))
-
-        toggle = RoundButton(text='暂停', bg=PALE, fg=PINK,
-                             size_hint_x=None, width=dp(72))
-        close = RoundButton(text='关闭', bg=PINK, fg=WHITE,
-                            size_hint_x=None, width=dp(72))
-
-        def on_toggle(*_):
-            if video.state == 'play':
-                video.state = 'pause'
-                toggle.text = '播放'
+            if platform != 'android':
+                import webbrowser
+                url = ('https://player.bilibili.com/player.html?bvid=%s&page=%d'
+                       % (bvid, page_num))
+                webbrowser.open(url)
+                self.status.text = '已在浏览器打开官方播放器'
+                return
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            Player = autoclass('org.bilibilidl.InAppPlayer')
+            result = str(Player.playBvid(
+                PythonActivity.mActivity, bvid, int(page_num), cookie or ''))
+            if result != 'ok':
+                self._alert('打开播放器失败：' + result)
+                self.status.text = '播放失败'
             else:
-                video.state = 'play'
-                toggle.text = '暂停'
-
-        toggle.bind(on_release=on_toggle)
-        close.bind(on_release=lambda *_: self._close_inapp_player())
-        bar.add_widget(toggle)
-        bar.add_widget(close)
-        root.add_widget(bar)
-
-        # 底部进度（可选，简单显示状态）
-        status_bar = BoxLayout(
-            size_hint=(1, None), height=dp(36),
-            pos_hint={'y': 0}, padding=[dp(12), 0],
-        )
-        with status_bar.canvas.before:
-            Color(0, 0, 0, 0.45)
-            status_bar._bg = Rectangle(pos=status_bar.pos, size=status_bar.size)
-        status_bar.bind(
-            pos=lambda o, v: setattr(o._bg, 'pos', v),
-            size=lambda o, v: setattr(o._bg, 'size', v),
-        )
-        self._player_status = self._label('播放中…', 12, WHITE, 32)
-        status_bar.add_widget(self._player_status)
-        root.add_widget(status_bar)
-
-        def on_eos(instance):
-            try:
-                self._player_status.text = '播放结束'
-                toggle.text = '播放'
-            except Exception:
-                pass
-
-        video.bind(on_eos=on_eos)
-
-        pop = Popup(
-            title='',
-            content=root,
-            size_hint=(1, 1),
-            auto_dismiss=False,
-            separator_height=0,
-            background='',
-            background_color=(0, 0, 0, 1),
-        )
-        # 去掉默认标题栏高度
-        try:
-            pop.title_size = 0
-        except Exception:
-            pass
-        self._player_popup = pop
-        pop.open()
-        self.status.text = '应用内播放中'
+                self.status.text = '官方播放器中（返回键关闭）'
+        except Exception as e:
+            self._alert('无法打开播放器：' + str(e))
 
     def _close_inapp_player(self):
-        video = getattr(self, '_player_video', None)
-        if video is not None:
+        if platform == 'android':
             try:
-                video.state = 'stop'
-                video.unload()
+                from jnius import autoclass
+                Player = autoclass('org.bilibilidl.InAppPlayer')
+                Player.dismiss()
             except Exception:
                 pass
-            self._player_video = None
-        pop = getattr(self, '_player_popup', None)
-        if pop is not None:
-            try:
-                pop.dismiss()
-            except Exception:
-                pass
-            self._player_popup = None
         try:
             self.status.text = '已关闭播放器'
         except Exception:
