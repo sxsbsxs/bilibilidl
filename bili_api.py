@@ -121,9 +121,9 @@ def _wbi_mixin_key(session):
              22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
     return ''.join(source[i] for i in order if i < len(source))[:32]
 
-def _signed_playurl(session, info, qn):
+def _signed_playurl(session, info, qn, mixin=None):
     import hashlib
-    mixin = _wbi_mixin_key(session)
+    mixin = mixin or _wbi_mixin_key(session)
     params = {'cid': int(info['cid']), 'qn': int(qn), 'fnval': 4048, 'fnver': 0, 'fourk': 1, 'wts': int(time.time())}
     if info.get('bvid'): params['bvid'] = info['bvid']
     else: params['avid'] = int(info.get('aid'))
@@ -133,21 +133,80 @@ def _signed_playurl(session, info, qn):
     return _api_json(session, API + '/x/player/wbi/playurl', params)
 
 def get_play_info(session, info, cookie=''):
-    """Return actual playable qualities from Bilibili's web playurl API."""
-    data = None
+    """Return qualities explicitly exposed by Bilibili, merging safe qn probes.
+
+    Some archives return a very short accept_quality list for qn=127. Probe a few
+    lower requested qualities and union only quality IDs that Bilibili itself returns;
+    this does not invent permissions or make a restricted stream downloadable.
+    """
+    responses = []
     try:
-        data = _signed_playurl(session, info, 127)
+        mixin = _wbi_mixin_key(session)
+        first_error = None
+        # Start with the highest request. Only probe lower qn values when the first
+        # response reports a narrow list, to avoid unnecessary requests for normal videos.
+        for qn in (127, 80, 64, 32, 16):
+            try:
+                result = _signed_playurl(session, info, qn, mixin=mixin)
+                if isinstance(result, dict):
+                    responses.append(result)
+                accepted_now = result.get('accept_quality') or []
+                if qn == 127 and len(accepted_now) >= 4:
+                    break
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+                # If the highest request itself failed, lower qn requests can still work.
+                continue
+        if not responses:
+            raise first_error or BiliAPIError('B站没有返回可用播放信息')
     except Exception:
-        # Compatibility fallback for deployments/videos where legacy API remains enabled.
-        params = {'cid':info['cid'], 'qn':127, 'fnval':1, 'fnver':0, 'fourk':1}
-        if info.get('bvid'): params['bvid'] = info['bvid']
-        else: params['avid'] = info.get('aid')
-        data = _api_json(session, API+'/x/player/playurl', params)
-    accepted = data.get('accept_quality') or []
-    descriptions = data.get('accept_description') or []
+        # Compatibility fallback for deployments/videos where the signed endpoint fails.
+        params = {'cid': info['cid'], 'qn': 127, 'fnval': 1, 'fnver': 0, 'fourk': 1}
+        if info.get('bvid'):
+            params['bvid'] = info['bvid']
+        else:
+            params['avid'] = info.get('aid')
+        data = _api_json(session, API + '/x/player/playurl', params)
+        responses = [data]
+
+    # Preserve the highest-request response as the primary playback payload.
+    data = responses[0]
     quality_map = {}
-    for q,d in zip(accepted, descriptions): quality_map[int(q)] = str(d)
-    return {'data':data, 'qualities':quality_map, 'format':('dash' if data.get('dash') else 'durl')}
+    for response in responses:
+        accepted = response.get('accept_quality') or []
+        descriptions = response.get('accept_description') or []
+        for index, q in enumerate(accepted):
+            try:
+                q = int(q)
+            except (TypeError, ValueError):
+                continue
+            desc = descriptions[index] if index < len(descriptions) else ''
+            quality_map[q] = str(desc or _quality_label(q))
+        # Some API variants expose stream IDs but omit accept_quality.
+        dash = response.get('dash') or {}
+        for stream in dash.get('video') or []:
+            try:
+                q = int(stream.get('id') or 0)
+            except (TypeError, ValueError):
+                continue
+            if q:
+                quality_map.setdefault(q, _quality_label(q))
+    # Sort from highest to lowest for a predictable UI.
+    quality_map = dict(sorted(quality_map.items(), reverse=True))
+    if quality_map:
+        data['accept_quality'] = list(quality_map.keys())
+        data['accept_description'] = list(quality_map.values())
+    return {'data': data, 'qualities': quality_map,
+            'format': ('dash' if data.get('dash') else 'durl')}
+
+
+def _quality_label(q):
+    labels = {127: '8K', 126: '杜比视界', 125: 'HDR', 120: '4K',
+              116: '1080P60', 112: '1080P+', 80: '1080P',
+              74: '720P60', 64: '720P', 32: '480P', 16: '360P',
+              15: '360P 极速'}
+    return labels.get(int(q), '%sP' % int(q))
 
 def format_duration(seconds):
     try: seconds = int(seconds)

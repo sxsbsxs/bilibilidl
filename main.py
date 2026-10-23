@@ -417,33 +417,46 @@ class AppRoot(BoxLayout):
             self._alert('应用内播放器启动失败：%s' % str(exc)[:120])
 
     def _close_inline_player(self):
-        """Release the overlay WebView so playback buffers can be reclaimed."""
+        """Detach and release WebView on Kivy's UI thread; avoid invalid Handler/Looper calls."""
         web = getattr(self, '_inline_player_web', None)
         root = getattr(self, '_inline_player_root', None)
-        activity = getattr(self, '_inline_player_activity', None)
-        try:
-            if web is not None:
-                web.stopLoading()
-                web.loadUrl('about:blank')
-                web.clearHistory()
-                web.removeAllViews()
-                web.destroy()
-        except Exception as exc:
-            print('[bilibilidl] 释放内嵌播放器失败: %s' % repr(exc))
-        try:
-            if root is not None and activity is not None:
-                activity.runOnUiThread(lambda: activity.removeContentView(root))
-        except Exception:
-            try:
-                parent = root.getParent() if root is not None else None
-                if parent is not None:
-                    parent.removeView(root)
-            except Exception:
-                pass
+        # Clear references first so repeated taps / callbacks cannot destroy twice.
         self._inline_player_web = None
         self._inline_player_root = None
         self._inline_player_activity = None
         self._inline_player_listener = None
+        try:
+            # All current call sites are UI callbacks (or are scheduled onto Clock).
+            # Do not pass a Python lambda to Activity.runOnUiThread: Pyjnius may fail
+            # to marshal it as java.lang.Runnable and Android can throw Looper.mQueue NPE.
+            parent = root.getParent() if root is not None else None
+            if parent is not None:
+                parent.removeView(root)
+        except Exception as exc:
+            print('[bilibilidl] 移除播放器视图失败: %s' % repr(exc))
+        if web is not None:
+            try:
+                web.stopLoading()
+            except Exception:
+                pass
+            try:
+                web.loadUrl('about:blank')
+            except Exception:
+                pass
+            try:
+                web.setWebChromeClient(None)
+                web.setWebViewClient(None)
+            except Exception:
+                pass
+            try:
+                web.clearHistory()
+                web.removeAllViews()
+            except Exception:
+                pass
+            try:
+                web.destroy()
+            except Exception as exc:
+                print('[bilibilidl] 释放内嵌播放器失败: %s' % repr(exc))
 
     def _open_video_url(self, url):
         try:
@@ -636,20 +649,30 @@ class AppRoot(BoxLayout):
         }
         candidates = []
         def add_candidate(value):
-            value = str(value or '').strip()
+            value = str(value or '').strip().replace('&amp;', '&')
             if value.startswith('//'):
                 value = 'https:' + value
             elif value.startswith('http://'):
                 value = 'https://' + value[len('http://'):]
-            if value and 'transparent.gif' not in value.lower() and value not in candidates:
-                candidates.append(value)
+            if not value or 'transparent.gif' in value.lower():
+                return
+            variants = [value]
+            # Bilibili image CDN often appends transformations such as @672w_378h_1c.webp.
+            # Pillow builds bundled for Android may not support WebP/AVIF, so try the
+            # original image path without CDN transformation suffixes as well.
+            if '@' in value:
+                base = value.split('@', 1)[0]
+                if base and base not in variants:
+                    variants.append(base)
+            for candidate in variants:
+                if candidate not in candidates:
+                    candidates.append(candidate)
         add_candidate(url)
         # Old archives such as av2 may expose transparent.gif; obtain webpage metadata too.
-        if not candidates:
-            add_candidate(self._find_page_cover(info))
+        add_candidate(self._find_page_cover(info))
         last_error = None
         tried = 0
-        while tried < 2:
+        while tried < 4:
             if tried >= len(candidates):
                 add_candidate(self._find_page_cover(info))
             if tried >= len(candidates):
@@ -712,7 +735,7 @@ class AppRoot(BoxLayout):
                 last_error = exc
                 print('[bilibilidl] 封面候选加载失败：%s' % repr(exc))
                 # If the API image failed, add webpage metadata as the final fallback.
-                if tried == 1:
+                if tried <= 2:
                     add_candidate(self._find_page_cover(info))
         message = str(last_error or 'B站没有提供可用的封面图片')[:120]
         print('[bilibilidl] 封面不可用（不影响解析/下载）：' + message)
