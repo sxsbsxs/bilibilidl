@@ -12,6 +12,7 @@ import qrcode
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.animation import Animation
 from kivy.metrics import dp
 from kivy.utils import platform
 from kivy.core.window import Window
@@ -19,16 +20,21 @@ from kivy.core.text import LabelBase
 from kivy.core.image import Image as CoreImage
 from kivy.uix.image import Image
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.progressbar import ProgressBar
+from kivy.uix.video import Video
 from kivy.uix.popup import Popup
 from kivy.graphics import Color, RoundedRectangle
 
-from bili_api import new_session, get_video_info, get_play_info, format_duration
+from bili_api import (new_session, get_video_info, get_play_info, format_duration,
+                      get_popular_videos, get_comments, get_danmaku,
+                      get_stream_urls, like_video, coin_video,
+                      favorite_video, follow_user)
 from login_manager import qr_generate, qr_poll, validate_login
 from downloader import download_video, preload_merger
 
@@ -205,7 +211,7 @@ class AppRoot(BoxLayout):
         self.body = BoxLayout(orientation='vertical', spacing=dp(8))
         self.add_widget(self.body)
         nav = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
-        for text, page in [('主页', 'home'), ('已下载', 'history'),
+        for text, page in [('首页', 'home'), ('下载', 'download'), ('已下载', 'history'),
                            ('我的', 'mine')]:
             b = RoundButton(text=text, bg=PALE, fg=PINK)
             b.bind(on_release=lambda _, p=page: self.show_page(p))
@@ -216,7 +222,11 @@ class AppRoot(BoxLayout):
         self.current_page = page
         self.body.clear_widgets()
         if page == 'home':
+            self._feed_page()
+        elif page == 'download':
             self._home_page()
+        elif page == 'player':
+            self._player_page()
         elif page == 'history':
             self._history_page()
         else:
@@ -284,6 +294,343 @@ class AppRoot(BoxLayout):
         col.add_widget(self.log_lbl)
         sc.add_widget(col)
         self.body.add_widget(sc)
+
+    # ---------------------------- feed / player ---------------------------
+    def _feed_page(self):
+        """Bilibili public popular feed. Download tools remain on the Download tab."""
+        sc = ScrollView()
+        col = BoxLayout(orientation='vertical', spacing=dp(9), size_hint_y=None)
+        col.bind(minimum_height=col.setter('height'))
+        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        row.add_widget(self._label('推荐视频', 21, DARK, 38, True))
+        refresh = RoundButton(text='刷新', bg=PALE, fg=PINK, size_hint_x=None, width=dp(76))
+        refresh.bind(on_release=lambda *_: self._load_feed())
+        row.add_widget(refresh)
+        col.add_widget(row)
+        col.add_widget(self._label('来自 B 站公开热门视频。点开卡片查看视频信息、弹幕和评论；下载功能仍在底部“下载”。', 12, MUTED, 48))
+        self.feed_status = self._label('正在加载推荐视频…', 12, MUTED, 32)
+        col.add_widget(self.feed_status)
+        self.feed_list = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
+        self.feed_list.bind(minimum_height=self.feed_list.setter('height'))
+        col.add_widget(self.feed_list)
+        sc.add_widget(col)
+        self.body.add_widget(sc)
+        self._load_feed()
+
+    def _load_feed(self):
+        if not hasattr(self, 'feed_status'):
+            return
+        self.feed_status.text = '正在获取 B 站推荐视频…'
+        self.feed_list.clear_widgets()
+        threading.Thread(target=self._feed_worker, daemon=True).start()
+
+    def _feed_worker(self):
+        try:
+            session = new_session(self.account.get('cookie', '') if self.account else '')
+            items = get_popular_videos(session, page=1, page_size=20)
+            ui(lambda items=items: self._feed_done(items))
+        except Exception as e:
+            msg = str(e)
+            ui(lambda msg=msg: setattr(
+                self.feed_status, 'text',
+                '推荐加载失败：%s。请检查网络后点刷新。' % msg[:100]
+            ) if hasattr(self, 'feed_status') else None)
+
+    def _feed_done(self, items):
+        self.feed_list.clear_widgets()
+        self._feed_items = {}
+        if not items:
+            self.feed_status.text = '暂时没有返回视频。'
+            return
+        self.feed_status.text = '已加载 %d 个视频' % len(items)
+        for item in items:
+            bvid = item.get('bvid') or ''
+            aid = item.get('aid') or 0
+            self._feed_items[bvid or str(aid)] = item
+            card = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(4),
+                             size_hint_y=None, height=dp(116))
+            title = str(item.get('title') or '未命名视频').replace('&amp;', '&')
+            card.add_widget(self._label(title, 14, DARK, 42, True))
+            owner_value = item.get('owner') or {}
+            owner = owner_value.get('name', '未知 UP 主') if isinstance(owner_value, dict) else str(owner_value)
+            stat = item.get('stat') or {}
+            views = stat.get('view', item.get('view', 0))
+            danmaku_count = stat.get('danmaku', item.get('danmaku', 0))
+            likes = stat.get('like', item.get('like', 0))
+            card.add_widget(self._label('%s  ·  ▶ %s  ·  弹幕 %s  ·  👍 %s' % (
+                owner, views, danmaku_count, likes), 11, MUTED, 24))
+            open_btn = RoundButton(text='打开视频详情', size_hint_y=None, height=dp(38))
+            open_btn.bind(on_release=lambda _, data=item: self.open_video(data))
+            card.add_widget(open_btn)
+            self.feed_list.add_widget(card)
+
+    def open_video(self, item):
+        self.current_video = dict(item)
+        self.current_page = 'player'
+        self.body.clear_widgets()
+        self._player_page()
+
+    def _player_page(self):
+        """Video detail page with best-effort in-app playback and real account actions."""
+        item = getattr(self, 'current_video', {}) or {}
+        sc = ScrollView()
+        col = BoxLayout(orientation='vertical', spacing=dp(8), size_hint_y=None)
+        col.bind(minimum_height=col.setter('height'))
+        back = RoundButton(text='← 返回推荐', bg=PALE, fg=PINK,
+                           size_hint_y=None, height=dp(42))
+        back.bind(on_release=lambda *_: self.show_page('home'))
+        col.add_widget(back)
+        title = str(item.get('title') or '视频详情')
+        col.add_widget(self._label(title, 18, DARK, 58, True))
+        owner_value = item.get('owner') or {}
+        owner = owner_value.get('name', '未知 UP 主') if isinstance(owner_value, dict) else str(owner_value)
+        stat = item.get('stat') or {}
+        col.add_widget(self._label('UP主：%s\n播放：%s  弹幕：%s  点赞：%s' % (
+            owner, stat.get('view', item.get('view', 0)),
+            stat.get('danmaku', item.get('danmaku', 0)),
+            stat.get('like', item.get('like', 0))), 12, MUTED, 54))
+
+        # Kivy's native Video widget attempts local playback. Some Android builds/codecs
+        # cannot play the HLS/DASH URLs returned by Bilibili; the official-player fallback remains.
+        video_frame = FloatLayout(size_hint_y=None, height=dp(220))
+        self.inline_video = Video(source='', state='stop', options={'eos': 'stop'},
+                                  size_hint=(1, 1), allow_stretch=True)
+        video_frame.add_widget(self.inline_video)
+        self.danmaku_overlay = FloatLayout(size_hint=(1, 1))
+        video_frame.add_widget(self.danmaku_overlay)
+        col.add_widget(video_frame)
+        play_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        self.inline_play_btn = RoundButton(text='▶ 应用内播放', size_hint_x=0.55)
+        self.inline_play_btn.bind(on_release=lambda *_: self._start_inline_playback(item))
+        bvid = item.get('bvid') or ''
+        aid = item.get('aid') or 0
+        url = 'https://www.bilibili.com/video/%s' % bvid if bvid else 'https://www.bilibili.com/video/av%s' % aid
+        external = RoundButton(text='打开官方播放器', bg=PALE, fg=PINK, size_hint_x=0.45)
+        external.bind(on_release=lambda *_: self._open_video_url(url))
+        play_row.add_widget(self.inline_play_btn)
+        play_row.add_widget(external)
+        col.add_widget(play_row)
+        self.player_status = self._label('正在加载播放地址、弹幕和评论…', 12, PINK, 36)
+        col.add_widget(self.player_status)
+
+        action_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(5))
+        for text, action in [('点赞', 'like'), ('投币', 'coin'), ('收藏', 'favorite'), ('关注UP', 'follow')]:
+            btn = RoundButton(text=text, bg=PALE, fg=PINK)
+            btn.bind(on_release=lambda _, a=action: self._video_action(a))
+            action_row.add_widget(btn)
+        col.add_widget(action_row)
+        col.add_widget(self._label('弹幕预览', 16, DARK, 32, True))
+        self.danmaku_box = BoxLayout(orientation='vertical', spacing=dp(3), size_hint_y=None)
+        self.danmaku_box.bind(minimum_height=self.danmaku_box.setter('height'))
+        col.add_widget(self.danmaku_box)
+        col.add_widget(self._label('最新评论', 16, DARK, 32, True))
+        self.comment_box = BoxLayout(orientation='vertical', spacing=dp(5), size_hint_y=None)
+        self.comment_box.bind(minimum_height=self.comment_box.setter('height'))
+        col.add_widget(self.comment_box)
+        dl = RoundButton(text='下载这个视频', bg=PINK, size_hint_y=None, height=dp(46))
+        dl.bind(on_release=lambda *_: self._send_video_to_downloader(item))
+        col.add_widget(dl)
+        sc.add_widget(col)
+        self.body.add_widget(sc)
+        self._inline_play_url = None
+        self._danmaku_events = []
+        self._danmaku_index = 0
+        threading.Thread(target=self._player_data_worker, args=(item,), daemon=True).start()
+
+    def _start_inline_playback(self, item):
+        url = getattr(self, '_inline_play_url', None)
+        if not url:
+            self._alert('暂时没有可供应用内播放器使用的直链。请尝试“打开官方播放器”，或稍后重试。')
+            return
+        try:
+            self.inline_video.source = url
+            self.inline_video.state = 'play'
+            self.player_status.text = '正在尝试应用内播放；如果画面无法加载，请使用官方播放器。'
+        except Exception as e:
+            self._alert('应用内播放失败：' + str(e))
+
+    def _video_action(self, action):
+        item = getattr(self, 'current_video', {}) or {}
+        if not self._logged_in():
+            self._alert('请先使用 B 站授权登录，再执行点赞、投币、收藏或关注。')
+            return
+        threading.Thread(target=self._video_action_worker, args=(action, item), daemon=True).start()
+
+    def _video_action_worker(self, action, item):
+        try:
+            cookie = self.account.get('cookie', '') if self.account else ''
+            session = new_session(cookie)
+            # Resolve full detail when a feed item lacks aid/cid/mid fields.
+            bvid = item.get('bvid') or ''
+            aid = item.get('aid')
+            if not aid and bvid:
+                detail = get_video_info(session, bvid)
+                item = dict(detail)
+                owner = {'mid': detail.get('mid')}
+            else:
+                owner = item.get('owner') or {}
+                if not isinstance(owner, dict):
+                    owner = {'mid': item.get('mid')}
+            if action == 'like':
+                like_video(session, item, like=True)
+                label = '点赞成功'
+            elif action == 'coin':
+                coin_video(session, item, multiply=1, select_like=False)
+                label = '投币成功'
+            elif action == 'favorite':
+                favorite_video(session, item, add=True)
+                label = '收藏请求成功'
+            elif action == 'follow':
+                mid = owner.get('mid') or item.get('mid')
+                if not mid:
+                    detail = get_video_info(session, bvid or ('av' + str(aid)))
+                    mid = detail.get('mid')
+                follow_user(session, mid, follow=True)
+                label = '关注请求成功'
+            else:
+                raise RuntimeError('未知操作')
+            ui(lambda msg=label: self._alert(msg))
+        except Exception as e:
+            msg = str(e)
+            ui(lambda msg=msg: self._alert('操作失败：' + msg[:180]))
+
+    def _open_video_url(self, url):
+        try:
+            if platform == 'android':
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                PythonActivity.mActivity.startActivity(intent)
+            else:
+                import webbrowser
+                webbrowser.open(url)
+        except Exception as e:
+            self._alert('无法打开 B 站播放器：' + str(e))
+
+    def _send_video_to_downloader(self, item):
+        bvid = item.get('bvid') or ''
+        aid = item.get('aid') or ''
+        self.show_page('download')
+        if hasattr(self, 'url_input'):
+            self.url_input.text = bvid or ('av' + str(aid))
+            self.parse_async()
+
+    def _player_data_worker(self, item):
+        try:
+            cookie = self.account.get('cookie', '') if self.account else ''
+            session = new_session(cookie)
+            bvid = item.get('bvid') or ''
+            aid = item.get('aid')
+            # Normalize feed cards through the same detail parser used by downloads.
+            if bvid or aid:
+                detail = get_video_info(session, bvid or ('av' + str(aid)))
+                item.update(detail)
+            cid = item.get('cid')
+            if not cid:
+                pages = item.get('pages') or []
+                if pages:
+                    cid = pages[0].get('cid')
+                    item['cid'] = cid
+            play_url = None
+            if cid:
+                try:
+                    stream = get_stream_urls(session, item, quality=32)
+                    candidate = stream.get('video_url')
+                    # Kivy's Android Video backend is not compatible with every DASH URL.
+                    # Only attempt an inline URL if the API returned a direct progressive stream.
+                    if stream.get('format') == 'durl' and candidate:
+                        play_url = candidate
+                except Exception:
+                    pass
+            danmaku = []
+            if cid:
+                try:
+                    danmaku = get_danmaku(session, cid, limit=1000)
+                except Exception:
+                    pass
+            comments = []
+            if item.get('aid'):
+                try:
+                    comments = get_comments(session, item.get('aid'), page=1, page_size=20)
+                except Exception:
+                    pass
+            ui(lambda d=danmaku, c=comments, u=play_url: self._player_data_done(d, c, u))
+        except Exception as e:
+            msg = str(e)
+            ui(lambda msg=msg: setattr(self.player_status, 'text',
+                                       '弹幕/评论加载失败：' + msg[:90])
+               if hasattr(self, 'player_status') else None)
+
+    def _player_data_done(self, danmaku, comments, play_url=None):
+        if not hasattr(self, 'danmaku_box'):
+            return
+        self._inline_play_url = play_url
+        self.danmaku_box.clear_widgets()
+        self.comment_box.clear_widgets()
+        if danmaku:
+            self._danmaku_events = sorted(
+                [d for d in danmaku if isinstance(d, dict)],
+                key=lambda d: float(d.get('time') or 0))
+            self._danmaku_index = 0
+            self.danmaku_overlay.clear_widgets()
+            for entry in self._danmaku_events[:20]:
+                self.danmaku_box.add_widget(self._label('💬 ' + str(entry.get('text', '')), 12, DARK, 26))
+            if not getattr(self, '_danmaku_clock', None):
+                self._danmaku_clock = Clock.schedule_interval(self._sync_danmaku_overlay, 0.2)
+        else:
+            self._danmaku_events = []
+            self._danmaku_index = 0
+            self.danmaku_overlay.clear_widgets()
+            self.danmaku_box.add_widget(self._label('没有获取到公开弹幕，或该视频暂不提供弹幕 XML。', 12, MUTED, 34))
+        if comments:
+            for item in comments[:15]:
+                member = item.get('member') or {}
+                content = item.get('content') or {}
+                uname = item.get('user') or member.get('uname', '用户')
+                message = str(item.get('message') if item.get('message') is not None else content.get('message', '')).replace('\n', ' ')
+                self.comment_box.add_widget(self._label('%s：%s' % (uname, message), 12, DARK, 48))
+        else:
+            self.comment_box.add_widget(self._label('没有获取到公开评论，稍后可刷新重试。', 12, MUTED, 34))
+        self.player_status.text = '已读取 %d 条弹幕、%d 条评论。应用内滚动弹幕仅在可播放直链时同步尝试显示。' % (len(danmaku), len(comments))
+
+    def _sync_danmaku_overlay(self, _dt):
+        """Render timestamped XML danmaku over the inline video when it is playing."""
+        try:
+            video = getattr(self, 'inline_video', None)
+            overlay = getattr(self, 'danmaku_overlay', None)
+            events = getattr(self, '_danmaku_events', [])
+            if not video or not overlay or not events or video.state != 'play':
+                return
+            position = float(getattr(video, 'position', 0) or 0)
+            index = getattr(self, '_danmaku_index', 0)
+            # Catch up after seeks without flooding the screen.
+            while index < len(events) and float(events[index].get('time') or 0) < position - 1.5:
+                index += 1
+            shown = 0
+            while index < len(events) and float(events[index].get('time') or 0) <= position + 0.35 and shown < 4:
+                entry = events[index]
+                text = str(entry.get('text') or '').strip()
+                if text:
+                    label = Label(text=text, font_name=APP_FONT, font_size=dp(14),
+                                  color=(1, 1, 1, 1), outline_width=dp(1.2),
+                                  outline_color=(0, 0, 0, 1), size_hint=(None, None),
+                                  size=(max(dp(120), min(dp(330), dp(8 * len(text) + 40))), dp(28)),
+                                  pos_hint={'x': 0.95, 'y': 0.72 - (shown % 4) * 0.17},
+                                  halign='center', valign='middle')
+                    label.text_size = label.size
+                    overlay.add_widget(label)
+                    start_x = overlay.width + dp(10)
+                    end_x = -label.width - dp(10)
+                    label.x = start_x
+                    Animation(x=end_x, duration=7.0).start(label)
+                    Clock.schedule_once(lambda _t, w=label, parent=overlay: parent.remove_widget(w) if w.parent else None, 7.2)
+                    shown += 1
+                index += 1
+            self._danmaku_index = index
+        except Exception:
+            pass
 
     # ---------------------------- parse ---------------------------------
     def parse_async(self):
