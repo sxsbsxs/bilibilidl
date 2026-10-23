@@ -16,7 +16,8 @@ fullscreen = 0
 
 icon.filename = %(source.dir)s/bilibilidl图标.png
 presplash.filename = %(source.dir)s/bilibilidl加载图.png
-android.presplash_color = #FDEBF2
+# 启动画面背景改为纯白；应用启动后 main.py 的 style_system_bars() 负责状态栏/导航栏白底深色图标
+android.presplash_color = #FFFFFF
 
 # Python 和界面依赖（p4a 不会自动装依赖的依赖，所以这里全部列出）
 requirements = python3,kivy==2.2.1,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
