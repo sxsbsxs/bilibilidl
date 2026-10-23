@@ -367,14 +367,32 @@ class AppRoot(BoxLayout):
             settings = web.getSettings()
             settings.setJavaScriptEnabled(True)
             settings.setDomStorageEnabled(True)
-            settings.setMediaPlaybackRequiresUserGesture(True)
+            # The player must be able to start after the user taps its own play control.
+            settings.setMediaPlaybackRequiresUserGesture(False)
             settings.setLoadsImagesAutomatically(True)
+            settings.setJavaScriptCanOpenWindowsAutomatically(True)
+            settings.setSupportMultipleWindows(False)
+            settings.setUseWideViewPort(True)
+            settings.setLoadWithOverviewMode(True)
+            settings.setDefaultTextEncodingName('UTF-8')
+            try:
+                settings.setBuiltInZoomControls(False)
+                settings.setDisplayZoomControls(False)
+                settings.setAllowFileAccess(False)
+            except Exception:
+                pass
+            CookieManager.getInstance().setAcceptCookie(True)
             if int(BuildVersion.SDK_INT) >= 21:
                 settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW, for legacy embeds
                 CookieManager.getInstance().setAcceptThirdPartyCookies(web, True)
             web.setBackgroundColor(Color.BLACK)
             web.setWebViewClient(WebViewClient())
             web.setWebChromeClient(WebChromeClient())
+            try:
+                web.setFocusable(True)
+                web.setFocusableInTouchMode(True)
+            except Exception:
+                pass
             root.addView(web, FrameLayout.LayoutParams(
                 ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
 
@@ -389,6 +407,30 @@ class AppRoot(BoxLayout):
             button_params.rightMargin = int(10 * density)
             root.addView(close_btn, button_params)
 
+            page_btn = Button(activity)
+            page_btn.setText('视频页备用播放')
+            page_btn.setTextColor(Color.WHITE)
+            page_btn.setBackgroundColor(Color.rgb(70, 70, 70))
+            page_params = FrameLayout.LayoutParams(
+                int(148 * density), int(48 * density), Gravity.TOP | Gravity.LEFT)
+            page_params.topMargin = int(28 * density)
+            page_params.leftMargin = int(10 * density)
+            root.addView(page_btn, page_params)
+
+            class _PageListener(PythonJavaClass):
+                __javainterfaces__ = ['android/view/View$OnClickListener']
+                __javacontext__ = 'app'
+                def __init__(self, webview, page_url):
+                    super().__init__()
+                    self.webview = webview
+                    self.page_url = page_url
+                @java_method('(Landroid/view/View;)V')
+                def onClick(self, view):
+                    try:
+                        self.webview.loadUrl(self.page_url)
+                    except Exception as exc:
+                        print('[bilibilidl] 备用视频页加载失败: %s' % repr(exc))
+
             class _CloseListener(PythonJavaClass):
                 __javainterfaces__ = ['android/view/View$OnClickListener']
                 __javacontext__ = 'app'
@@ -399,18 +441,32 @@ class AppRoot(BoxLayout):
                 def onClick(self, view):
                     Clock.schedule_once(lambda _dt: self.owner._close_inline_player(), 0)
 
+            cid = str(info.get('cid') or '')
+            page = '1'
+            if bvid:
+                player_url = ('https://player.bilibili.com/player.html?bvid=%s&cid=%s&page=%s'
+                              '&autoplay=0&high_quality=1&danmaku=0' % (bvid, cid, page))
+                video_page_url = 'https://www.bilibili.com/video/' + bvid
+            else:
+                player_url = ('https://player.bilibili.com/player.html?aid=%s&cid=%s&page=%s'
+                              '&autoplay=0&high_quality=1&danmaku=0' % (aid, cid, page))
+                video_page_url = 'https://www.bilibili.com/video/av' + aid
             self._inline_player_root = root
             self._inline_player_web = web
             self._inline_player_activity = activity
             self._inline_player_listener = _CloseListener(self)
+            self._inline_player_page_listener = _PageListener(web, video_page_url)
             close_btn.setOnClickListener(self._inline_player_listener)
+            page_btn.setOnClickListener(self._inline_player_page_listener)
             activity.addContentView(root, ViewGroup.LayoutParams(
                 ViewGroup.MATCH_PARENT, ViewGroup.MATCH_PARENT))
-            if bvid:
-                player_url = 'https://player.bilibili.com/player.html?bvid=%s&autoplay=0&high_quality=1' % bvid
-            else:
-                player_url = 'https://player.bilibili.com/player.html?aid=%s&autoplay=0&high_quality=1' % aid
             web.loadUrl(player_url)
+            try:
+                CookieManager.getInstance().flush()
+                web.requestFocus()
+                root.bringToFront()
+            except Exception:
+                pass
         except Exception as exc:
             print('[bilibilidl] 内嵌播放器启动失败: %s' % repr(exc))
             self._close_inline_player()
@@ -425,6 +481,7 @@ class AppRoot(BoxLayout):
         self._inline_player_root = None
         self._inline_player_activity = None
         self._inline_player_listener = None
+        self._inline_player_page_listener = None
         try:
             # All current call sites are UI callbacks (or are scheduled onto Clock).
             # Do not pass a Python lambda to Activity.runOnUiThread: Pyjnius may fail
@@ -439,10 +496,8 @@ class AppRoot(BoxLayout):
                 web.stopLoading()
             except Exception:
                 pass
-            try:
-                web.loadUrl('about:blank')
-            except Exception:
-                pass
+            # Do not navigate to about:blank during teardown. WebView.loadUrl() may
+            # post to a Looper whose MessageQueue is already gone during Activity teardown.
             try:
                 web.setWebChromeClient(None)
                 web.setWebViewClient(None)
@@ -505,17 +560,36 @@ class AppRoot(BoxLayout):
                 first['duration'] = pages[0].get('duration', info.get('duration', 0))
             play = get_play_info(session, first, cookie)
             data = play['data']
-            accepted = data.get('accept_quality') or []
-            descriptions = data.get('accept_description') or []
+            # Use the API helper's merged quality map instead of zip()'ing two
+            # server arrays (some Bilibili responses have mismatched lengths).
+            merged_qualities = play.get('qualities') or {}
             qlist = []
-            for q, d in zip(accepted, descriptions):
-                q = int(q)
-                qlist.append((q, str(d)))
+            if isinstance(merged_qualities, dict):
+                for q, desc in sorted(merged_qualities.items(), key=lambda item: int(item[0]), reverse=True):
+                    try:
+                        qlist.append((int(q), str(desc or ('%sP' % q))))
+                    except (TypeError, ValueError):
+                        continue
             if not qlist:
+                accepted = data.get('accept_quality') or []
+                descriptions = data.get('accept_description') or []
+                for index, q in enumerate(accepted):
+                    try:
+                        q = int(q)
+                    except (TypeError, ValueError):
+                        continue
+                    desc = descriptions[index] if index < len(descriptions) else ''
+                    qlist.append((q, str(desc or ('%sP' % q))))
+            if not qlist:
+                seen = set()
                 for item in (data.get('dash') or {}).get('video', []):
-                    q = int(item.get('id', 0))
-                    if q and (q, str(q) + 'P') not in qlist:
-                        qlist.append((q, str(q) + 'P'))
+                    try:
+                        q = int(item.get('id', 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if q and q not in seen:
+                        qlist.append((q, '%sP' % q))
+                        seen.add(q)
             if not qlist and data.get('durl'):
                 qlist = [(0, '自动 / 当前可用画质')]
             self.info = info
@@ -606,36 +680,60 @@ class AppRoot(BoxLayout):
                              daemon=True).start()
 
     def _find_page_cover(self, info):
-        """Try page metadata when a legacy archive API returns transparent.gif."""
+        """Try multiple Bilibili page variants when an archive has a placeholder pic."""
         bvid = str(info.get('bvid') or '').strip()
-        aid = info.get('aid')
-        page_url = ('https://www.bilibili.com/video/' + bvid if bvid else
-                    ('https://www.bilibili.com/video/av%s' % aid if aid else ''))
-        if not page_url:
-            return ''
-        try:
-            response = requests.get(page_url, timeout=(5, 8), headers={
-                'Referer': 'https://www.bilibili.com/',
-                'User-Agent': ('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
-                               'Chrome/124.0 Mobile Safari/537.36'),
-            })
-            response.raise_for_status()
-            html = response.text[:2_000_000]
-            patterns = (
-                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-                r'<meta[^>]+itemprop=["\']image["\'][^>]+content=["\']([^"\']+)',
-            )
-            for pattern in patterns:
-                match = re.search(pattern, html, re.I)
-                if match:
-                    candidate = match.group(1).replace('&amp;', '&').strip()
+        aid = str(info.get('aid') or '').strip()
+        page_urls = []
+        if bvid:
+            page_urls.extend([
+                'https://www.bilibili.com/video/' + bvid,
+                'https://m.bilibili.com/video/' + bvid,
+            ])
+        if aid:
+            page_urls.extend([
+                'https://www.bilibili.com/video/av' + aid,
+                'https://m.bilibili.com/video/av' + aid,
+            ])
+        seen_urls = set()
+        headers = {
+            'Referer': 'https://www.bilibili.com/',
+            'User-Agent': ('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
+                           'Chrome/124.0 Mobile Safari/537.36'),
+        }
+        for page_url in page_urls:
+            if page_url in seen_urls:
+                continue
+            seen_urls.add(page_url)
+            try:
+                response = requests.get(page_url, timeout=(5, 8), headers=headers)
+                response.raise_for_status()
+                html = response.text[:2_000_000]
+                # Parse meta tags regardless of attribute order; Bilibili changes markup.
+                for tag in re.findall(r'<meta\b[^>]*>', html, re.I):
+                    prop = re.search(r'(?:property|name|itemprop)=["\']([^"\']+)', tag, re.I)
+                    content = re.search(r'content=["\']([^"\']+)', tag, re.I)
+                    if not prop or not content:
+                        continue
+                    if prop.group(1).lower() not in ('og:image', 'twitter:image', 'image'):
+                        continue
+                    candidate = content.group(1).replace('&amp;', '&').strip()
                     if candidate.startswith('//'):
                         candidate = 'https:' + candidate
                     if candidate.startswith('http') and 'transparent.gif' not in candidate.lower():
                         return candidate
-        except Exception as exc:
-            print('[bilibilidl] 老视频网页封面回退失败: %s' % repr(exc))
+                # Some pages embed the cover in initial-state JSON instead of meta tags.
+                for pattern in (r'"cover"\s*:\s*"([^"]+)"',
+                                r'"pic"\s*:\s*"([^"]+)"'):
+                    match = re.search(pattern, html, re.I)
+                    if match:
+                        candidate = match.group(1).replace('\\/', '/').replace('\\u002F', '/')
+                        candidate = candidate.replace('\\u0026', '&')
+                        if candidate.startswith('//'):
+                            candidate = 'https:' + candidate
+                        if candidate.startswith('http') and 'transparent.gif' not in candidate.lower():
+                            return candidate
+            except Exception as exc:
+                print('[bilibilidl] 老视频网页封面回退失败 %s: %s' % (page_url, repr(exc)))
         return ''
 
     def _load_cover(self, url, info=None):
@@ -657,13 +755,22 @@ class AppRoot(BoxLayout):
             if not value or 'transparent.gif' in value.lower():
                 return
             variants = [value]
-            # Bilibili image CDN often appends transformations such as @672w_378h_1c.webp.
-            # Pillow builds bundled for Android may not support WebP/AVIF, so try the
-            # original image path without CDN transformation suffixes as well.
+            # Bilibili's CDN accepts explicit output formats. Try JPEG thumbnails as
+            # well as the original path, because Android Pillow builds may lack WebP/AVIF.
             if '@' in value:
                 base = value.split('@', 1)[0]
                 if base and base not in variants:
                     variants.append(base)
+                for suffix in ('@640w_360h_1c.jpg', '@320w_180h_1c.jpg', '@640w_360h.jpg'):
+                    converted = base + suffix
+                    if converted not in variants:
+                        variants.append(converted)
+            elif value.lower().endswith(('.webp', '.avif')):
+                base = value.rsplit('.', 1)[0]
+                for suffix in ('.jpg', '@640w_360h_1c.jpg', '@320w_180h_1c.jpg'):
+                    converted = base + suffix
+                    if converted not in variants:
+                        variants.append(converted)
             for candidate in variants:
                 if candidate not in candidates:
                     candidates.append(candidate)
@@ -672,7 +779,7 @@ class AppRoot(BoxLayout):
         add_candidate(self._find_page_cover(info))
         last_error = None
         tried = 0
-        while tried < 4:
+        while tried < 8:
             if tried >= len(candidates):
                 add_candidate(self._find_page_cover(info))
             if tried >= len(candidates):
@@ -739,15 +846,56 @@ class AppRoot(BoxLayout):
                     add_candidate(self._find_page_cover(info))
         message = str(last_error or 'B站没有提供可用的封面图片')[:120]
         print('[bilibilidl] 封面不可用（不影响解析/下载）：' + message)
-        def report_cover_issue():
-            try:
-                if getattr(self, 'meta_lbl', None) is not None:
-                    base = self.meta_lbl.text
-                    if '封面状态：' not in base:
-                        self.meta_lbl.text = base + '\n封面状态：暂时无法获取真实图片，解析和下载仍可用。'
-            except Exception:
-                pass
-        ui(report_cover_issue)
+        # Never leave the cover area blank. This is explicitly a fallback poster,
+        # not a claim that the original cover was recovered.
+        try:
+            from PIL import ImageDraw, ImageFont
+            poster = PILImage.new('RGB', (640, 400), (255, 238, 244))
+            draw = ImageDraw.Draw(poster)
+            font = None
+            if _font_path and os.path.isfile(_font_path):
+                try:
+                    font = ImageFont.truetype(_font_path, 28)
+                except Exception:
+                    font = None
+            if font is None:
+                font = ImageFont.load_default()
+            draw.rounded_rectangle((18, 18, 622, 382), radius=26,
+                                   outline=(235, 90, 140), width=4)
+            draw.text((38, 42), 'bilibilidl', fill=(190, 45, 100), font=font)
+            title = str(info.get('title') or '视频封面暂不可用')
+            lines = []
+            current = ''
+            for char in title:
+                if len(current) >= 18:
+                    lines.append(current)
+                    current = ''
+                current += char
+            if current:
+                lines.append(current)
+            y = 125
+            for line in lines[:4]:
+                draw.text((38, y), line, fill=(70, 55, 65), font=font)
+                y += 42
+            draw.text((38, 320), '原封面暂时无法获取', fill=(120, 90, 105), font=font)
+            out = io.BytesIO()
+            poster.save(out, format='JPEG', quality=82)
+            placeholder_bytes = out.getvalue()
+            poster.close()
+            def apply_placeholder():
+                try:
+                    if getattr(self, 'cover', None) is not None:
+                        self.cover.texture = CoreImage(io.BytesIO(placeholder_bytes), ext='jpg').texture
+                        self.cover.opacity = 1
+                    if getattr(self, 'meta_lbl', None) is not None:
+                        base = self.meta_lbl.text
+                        if '封面状态：' not in base:
+                            self.meta_lbl.text = base + '\n封面状态：原封面暂时无法获取，当前显示提示图。'
+                except Exception as exc:
+                    print('[bilibilidl] 封面占位图显示失败：%s' % repr(exc))
+            ui(apply_placeholder)
+        except Exception as exc:
+            print('[bilibilidl] 创建封面占位图失败：%s' % repr(exc))
 
     # ---------------------------- download --------------------------------
     def _downloads_dir(self):

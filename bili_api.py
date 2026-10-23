@@ -170,6 +170,40 @@ def get_play_info(session, info, cookie=''):
         data = _api_json(session, API + '/x/player/playurl', params)
         responses = [data]
 
+    # If the signed endpoint still reports fewer than four tiers, try the legacy
+    # playurl endpoint for intermediate tiers. This is only a discovery attempt;
+    # a tier is shown only if Bilibili returns an actual stream/accepted quality.
+    def _seen_quality_ids(items):
+        found = set()
+        for item in items:
+            for value in item.get('accept_quality') or []:
+                try:
+                    found.add(int(value))
+                except (TypeError, ValueError):
+                    pass
+            for stream in ((item.get('dash') or {}).get('video') or []):
+                try:
+                    found.add(int(stream.get('id') or 0))
+                except (TypeError, ValueError):
+                    pass
+        return found
+
+    if len(_seen_quality_ids(responses)) < 4:
+        for probe_qn in (74, 64, 32):
+            params = {'cid': info['cid'], 'qn': probe_qn,
+                      'fnval': 4048, 'fnver': 0, 'fourk': 1}
+            if info.get('bvid'):
+                params['bvid'] = info['bvid']
+            else:
+                params['avid'] = info.get('aid')
+            try:
+                legacy_result = _api_json(session, API + '/x/player/playurl', params)
+                if isinstance(legacy_result, dict):
+                    responses.append(legacy_result)
+            except Exception as exc:
+                # Keep the already usable signed response if legacy access is blocked.
+                print('[bilibilidl] 备用画质查询 qn=%s 失败: %s' % (probe_qn, str(exc)[:100]))
+
     # Preserve the highest-request response as the primary playback payload.
     data = responses[0]
     quality_map = {}
@@ -192,6 +226,15 @@ def get_play_info(session, info, cookie=''):
                 continue
             if q:
                 quality_map.setdefault(q, _quality_label(q))
+        # Some responses provide the actual selected stream in `quality` while
+        # accept_quality is incomplete. Include it only when the response really
+        # contains playable media data; never add the requested qn blindly.
+        try:
+            actual_q = int(response.get('quality') or 0)
+        except (TypeError, ValueError):
+            actual_q = 0
+        if actual_q and (dash.get('video') or response.get('durl')):
+            quality_map.setdefault(actual_q, _quality_label(actual_q))
     # Sort from highest to lowest for a predictable UI.
     quality_map = dict(sorted(quality_map.items(), reverse=True))
     if quality_map:
