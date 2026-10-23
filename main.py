@@ -9,6 +9,7 @@ from pathlib import Path
 
 import requests
 import qrcode
+from PIL import Image as PILImage, ImageFile
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -16,6 +17,7 @@ from kivy.animation import Animation
 from kivy.metrics import dp
 from kivy.utils import platform
 from kivy.core.window import Window
+from kivy.core.clipboard import Clipboard
 from kivy.core.text import LabelBase
 from kivy.core.image import Image as CoreImage
 from kivy.uix.image import Image
@@ -27,7 +29,6 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.progressbar import ProgressBar
-from kivy.uix.video import Video
 from kivy.uix.popup import Popup
 from kivy.graphics import Color, RoundedRectangle
 
@@ -390,27 +391,25 @@ class AppRoot(BoxLayout):
             stat.get('danmaku', item.get('danmaku', 0)),
             stat.get('like', item.get('like', 0))), 12, MUTED, 54))
 
-        # Kivy's native Video widget attempts local playback. Some Android builds/codecs
-        # cannot play the HLS/DASH URLs returned by Bilibili; the official-player fallback remains.
-        video_frame = FloatLayout(size_hint_y=None, height=dp(220))
-        self.inline_video = Video(source='', state='stop', options={'eos': 'stop'},
-                                  size_hint=(1, 1), allow_stretch=True)
-        video_frame.add_widget(self.inline_video)
-        self.danmaku_overlay = FloatLayout(size_hint=(1, 1))
-        video_frame.add_widget(self.danmaku_overlay)
-        col.add_widget(video_frame)
-        play_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
-        self.inline_play_btn = RoundButton(text='▶ 应用内播放', size_hint_x=0.55)
-        self.inline_play_btn.bind(on_release=lambda *_: self._start_inline_playback(item))
+        # Stable Android playback strategy: hand the Bilibili page to Android's
+        # ACTION_VIEW handler (official Bilibili app if installed, otherwise browser).
+        # Kivy's embedded player is deliberately not used because it often fails on DASH.
+        play_hint = self._label(
+            '视频使用手机上的 B 站 App 或浏览器播放，兼容性比应用内播放器更稳定。',
+            13, MUTED, 64)
+        col.add_widget(play_hint)
         bvid = item.get('bvid') or ''
         aid = item.get('aid') or 0
         url = 'https://www.bilibili.com/video/%s' % bvid if bvid else 'https://www.bilibili.com/video/av%s' % aid
-        external = RoundButton(text='打开官方播放器', bg=PALE, fg=PINK, size_hint_x=0.45)
+        play_row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(8))
+        external = RoundButton(text='▶ 打开 B 站播放', size_hint_x=0.62)
         external.bind(on_release=lambda *_: self._open_video_url(url))
-        play_row.add_widget(self.inline_play_btn)
+        copy_btn = RoundButton(text='复制视频链接', bg=PALE, fg=PINK, size_hint_x=0.38)
+        copy_btn.bind(on_release=lambda *_: self._copy_video_url(url))
         play_row.add_widget(external)
+        play_row.add_widget(copy_btn)
         col.add_widget(play_row)
-        self.player_status = self._label('正在加载播放地址、弹幕和评论…', 12, PINK, 36)
+        self.player_status = self._label('正在加载弹幕和评论…', 12, PINK, 36)
         col.add_widget(self.player_status)
 
         action_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(5))
@@ -438,16 +437,18 @@ class AppRoot(BoxLayout):
         threading.Thread(target=self._player_data_worker, args=(item,), daemon=True).start()
 
     def _start_inline_playback(self, item):
-        url = getattr(self, '_inline_play_url', None)
-        if not url:
-            self._alert('暂时没有可供应用内播放器使用的直链。请尝试“打开官方播放器”，或稍后重试。')
-            return
+        """Compatibility fallback for older callbacks: open the official video page."""
+        bvid = item.get('bvid') or ''
+        aid = item.get('aid') or 0
+        url = 'https://www.bilibili.com/video/%s' % bvid if bvid else 'https://www.bilibili.com/video/av%s' % aid
+        self._open_video_url(url)
+
+    def _copy_video_url(self, url):
         try:
-            self.inline_video.source = url
-            self.inline_video.state = 'play'
-            self.player_status.text = '正在尝试应用内播放；如果画面无法加载，请使用官方播放器。'
+            Clipboard.copy(str(url))
+            self._alert('视频链接已复制')
         except Exception as e:
-            self._alert('应用内播放失败：' + str(e))
+            self._alert('复制链接失败：' + str(e))
 
     def _video_action(self, action):
         item = getattr(self, 'current_video', {}) or {}
@@ -533,17 +534,8 @@ class AppRoot(BoxLayout):
                 if pages:
                     cid = pages[0].get('cid')
                     item['cid'] = cid
+            # Playback is delegated to the official app/browser; no fragile DASH URL needed.
             play_url = None
-            if cid:
-                try:
-                    stream = get_stream_urls(session, item, quality=32)
-                    candidate = stream.get('video_url')
-                    # Kivy's Android Video backend is not compatible with every DASH URL.
-                    # Only attempt an inline URL if the API returned a direct progressive stream.
-                    if stream.get('format') == 'durl' and candidate:
-                        play_url = candidate
-                except Exception:
-                    pass
             danmaku = []
             if cid:
                 try:
@@ -574,15 +566,11 @@ class AppRoot(BoxLayout):
                 [d for d in danmaku if isinstance(d, dict)],
                 key=lambda d: float(d.get('time') or 0))
             self._danmaku_index = 0
-            self.danmaku_overlay.clear_widgets()
             for entry in self._danmaku_events[:20]:
                 self.danmaku_box.add_widget(self._label('💬 ' + str(entry.get('text', '')), 12, DARK, 26))
-            if not getattr(self, '_danmaku_clock', None):
-                self._danmaku_clock = Clock.schedule_interval(self._sync_danmaku_overlay, 0.2)
         else:
             self._danmaku_events = []
             self._danmaku_index = 0
-            self.danmaku_overlay.clear_widgets()
             self.danmaku_box.add_widget(self._label('没有获取到公开弹幕，或该视频暂不提供弹幕 XML。', 12, MUTED, 34))
         if comments:
             for item in comments[:15]:
@@ -593,7 +581,7 @@ class AppRoot(BoxLayout):
                 self.comment_box.add_widget(self._label('%s：%s' % (uname, message), 12, DARK, 48))
         else:
             self.comment_box.add_widget(self._label('没有获取到公开评论，稍后可刷新重试。', 12, MUTED, 34))
-        self.player_status.text = '已读取 %d 条弹幕、%d 条评论。应用内滚动弹幕仅在可播放直链时同步尝试显示。' % (len(danmaku), len(comments))
+        self.player_status.text = '已读取 %d 条弹幕、%d 条评论。点击“打开 B 站播放”观看视频。' % (len(danmaku), len(comments))
 
     def _sync_danmaku_overlay(self, _dt):
         """Render timestamped XML danmaku over the inline video when it is playing."""
@@ -734,20 +722,50 @@ class AppRoot(BoxLayout):
                              daemon=True).start()
 
     def _load_cover(self, url):
+        """Load a safe static thumbnail; GIF/WEBP/legacy covers become JPEG."""
         try:
-            r = requests.get(url, timeout=15, headers={
+            if not url:
+                return
+            url = str(url).strip()
+            if url.startswith('//'):
+                url = 'https:' + url
+            elif url.startswith('http://'):
+                # Bilibili's older archive metadata can still contain HTTP URLs.
+                url = 'https://' + url[len('http://'):]
+            headers = {
                 'Referer': 'https://www.bilibili.com/',
-                'User-Agent': 'Mozilla/5.0'})
+                'User-Agent': ('Mozilla/5.0 (Linux; Android 14) '
+                               'AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36'),
+                'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            }
+            r = requests.get(url, timeout=(8, 18), headers=headers)
             r.raise_for_status()
-            data = r.content
-            ext = 'png' if r.headers.get('content-type', '').lower().endswith('png') else 'jpg'
+            if not r.content or len(r.content) > 15 * 1024 * 1024:
+                raise ValueError('封面文件为空或超过 15 MB')
+            # Do not hand GIF/WEBP/unknown image bytes directly to Kivy's decoder.
+            # Pillow seeks to frame 0 and normalizes the image to a bounded JPEG.
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            with PILImage.open(io.BytesIO(r.content)) as source:
+                try:
+                    source.seek(0)
+                except Exception:
+                    pass
+                frame = source.convert('RGB')
+                frame.thumbnail((640, 400), PILImage.Resampling.LANCZOS)
+                out = io.BytesIO()
+                frame.save(out, format='JPEG', quality=86, optimize=True)
+                data = out.getvalue()
             def apply_cover():
-                if hasattr(self, 'cover'):
-                    self.cover.texture = CoreImage(
-                        io.BytesIO(data), ext=ext).texture
+                if hasattr(self, 'cover') and self.cover:
+                    try:
+                        self.cover.texture = CoreImage(io.BytesIO(data), ext='jpg').texture
+                    except Exception:
+                        # A bad thumbnail must never break parsing or the UI.
+                        pass
             ui(apply_cover)
         except Exception:
-            pass
+            # Cover loading is optional: title, quality and download remain usable.
+            return
 
     # ---------------------------- download --------------------------------
     def _downloads_dir(self):

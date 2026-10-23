@@ -73,6 +73,15 @@ def get_nav(session):
     data = _api_json(session, API+'/x/web-interface/nav')
     return data if data.get('isLogin') else None
 
+def _normalize_cover_url(value):
+    """Normalize legacy/protocol-relative Bilibili cover URLs."""
+    value = str(value or '').strip()
+    if value.startswith('//'):
+        return 'https:' + value
+    if value.startswith('http://'):
+        return 'https://' + value[len('http://'):]
+    return value
+
 def get_video_info(session, url_or_id):
     ref = extract_video_id(url_or_id)
     if ref['kind'] == 'SHORT': ref = resolve_short(session, ref['url'])
@@ -89,7 +98,7 @@ def get_video_info(session, url_or_id):
         'title':view.get('title','(无标题)'), 'description':view.get('desc',''),
         'owner':(view.get('owner') or {}).get('name','未知UP主'),
         'mid':(view.get('owner') or {}).get('mid'), 'duration':view.get('duration',0),
-        'pic':view.get('pic',''), 'view':(view.get('stat') or {}).get('view',0),
+        'pic':_normalize_cover_url(view.get('pic')), 'view':(view.get('stat') or {}).get('view',0),
         'danmaku':(view.get('stat') or {}).get('danmaku',0), 'like':(view.get('stat') or {}).get('like',0),
         'coin':(view.get('stat') or {}).get('coin',0), 'favorite':(view.get('stat') or {}).get('favorite',0),
         'reply':(view.get('stat') or {}).get('reply',0), 'pages':pages,
@@ -172,7 +181,7 @@ def _normalize_video(view):
         'title': view.get('title') or '(无标题)',
         'description': view.get('desc') or '',
         'owner': owner.get('name') or '未知UP主', 'mid': owner.get('mid'),
-        'duration': view.get('duration') or 0, 'pic': view.get('pic') or '',
+        'duration': view.get('duration') or 0, 'pic': _normalize_cover_url(view.get('pic')),
         'view': stat.get('view', 0), 'danmaku': stat.get('danmaku', 0),
         'like': stat.get('like', 0), 'coin': stat.get('coin', 0),
         'favorite': stat.get('favorite', 0), 'reply': stat.get('reply', 0),
