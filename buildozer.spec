@@ -20,7 +20,8 @@ presplash.filename = %(source.dir)s/bilibilidl加载图.png
 android.presplash_color = #FFFFFF
 
 # Python 和界面依赖（p4a 不会自动装依赖的依赖，所以这里全部列出）
-requirements = python3,kivy==2.2.1,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
+# ffpyplayer：Kivy Video 在 Android 上应用内播放所需
+requirements = python3,kivy==2.2.1,ffpyplayer,pillow,pyjnius,certifi,requests,urllib3,idna,charset-normalizer,qrcode,pypng,typing_extensions
 
 # Android 兼容设置
 android.api = 33

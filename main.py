@@ -26,11 +26,22 @@ from kivy.uix.button import Button
 from kivy.uix.spinner import Spinner, SpinnerOption
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.popup import Popup
-from kivy.graphics import Color, RoundedRectangle
+from kivy.uix.video import Video
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.relativelayout import RelativeLayout
+from kivy.graphics import Color, RoundedRectangle, Rectangle
 
-from bili_api import new_session, get_video_info, get_play_info, format_duration
+from bili_api import (new_session, get_video_info, get_play_info,
+                      format_duration, get_stream_sources)
 from login_manager import qr_generate, qr_poll, validate_login
 from downloader import download_video, preload_merger
+
+
+def _safe_name(name):
+    import re
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_',
+                  (name or 'bilibili')).strip(' .')
+    return (name or 'bilibili')[:80]
 
 APP = 'bilibilidl'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -278,15 +289,19 @@ class AppRoot(BoxLayout):
             size_hint_y=None, height=dp(46), background_normal='',
             background_color=PALE, color=DARK)
         col.add_widget(self.mode_spinner)
-        self.dl_btn = RoundButton(text='开始下载',
-                                  size_hint_y=None, height=dp(52))
+        btn_row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        self.dl_btn = RoundButton(text='开始下载')
         self.dl_btn.bind(on_release=lambda *_: self.start_download())
-        col.add_widget(self.dl_btn)
+        btn_row.add_widget(self.dl_btn)
+        self.play_btn = RoundButton(text='在线播放', bg=BLUE)
+        self.play_btn.bind(on_release=lambda *_: self.start_online_play())
+        btn_row.add_widget(self.play_btn)
+        col.add_widget(btn_row)
         self.progress = ProgressBar(max=100, value=0,
                                     size_hint_y=None, height=dp(8))
         col.add_widget(self.progress)
         self.status = self._label(
-            '下载文件先保存在应用私有目录，可在“已下载”中导出。',
+            '下载文件先保存在应用私有目录，可在“已下载”中导出。点「在线播放」可缓冲后直接播放。',
             12, MUTED, 52)
         col.add_widget(self.status)
         self.log_lbl = self._label('', 11, MUTED, 68)
@@ -484,6 +499,8 @@ class AppRoot(BoxLayout):
             self._attachment_page = pages[0]
             self.busy = True
             self.dl_btn.disabled = True
+            if hasattr(self, 'play_btn'):
+                self.play_btn.disabled = True
             self.parse_btn.disabled = True
             threading.Thread(target=self._download_attachment,
                              args=(mode,), daemon=True).start()
@@ -496,10 +513,243 @@ class AppRoot(BoxLayout):
         self.busy = True
         self.cancel.clear()
         self.dl_btn.disabled = True
+        if hasattr(self, 'play_btn'):
+            self.play_btn.disabled = True
         self.parse_btn.disabled = True
         self.progress.value = 0
         threading.Thread(target=self._download_worker,
                          args=(quality, mode, pages), daemon=True).start()
+
+    # ---------------------------- online play -----------------------------
+    def start_online_play(self):
+        """全部直接播：缓冲到本地后用系统播放器打开（支持 DASH）。"""
+        if self.busy:
+            return
+        if not self.info:
+            self._alert('请先解析视频')
+            self.parse_async()
+            return
+
+        pages = self._selected_pages()
+        if len(pages) != 1:
+            self._alert('在线播放请先选择单个分P')
+            return
+
+        page = pages[0]
+        part_info = dict(self.info)
+        part_info.update(page)
+        part_info['cid'] = page.get('cid') or self.info.get('cid')
+        page_num = int(page.get('page') or 1)
+        part_title = str(page.get('part') or ('P%d' % page_num))
+        part_info['title'] = '%s - P%d %s' % (
+            self.info.get('title', 'B站视频'), page_num, part_title)
+
+        quality = self._selected_quality()
+        if quality >= 80 and not self._logged_in():
+            self._alert('1080P 及以上需要先登录')
+            self.show_login()
+            return
+
+        self.busy = True
+        self.cancel.clear()
+        self.play_btn.disabled = True
+        self.dl_btn.disabled = True
+        self.parse_btn.disabled = True
+        self.progress.value = 0
+        self.status.text = '正在准备在线播放…'
+        threading.Thread(
+            target=self._online_play_worker,
+            args=(part_info, quality),
+            daemon=True
+        ).start()
+
+    def _online_play_worker(self, part_info, quality):
+        try:
+            cookie = self.account.get('cookie', '') if self.account else ''
+            tmp_dir = os.path.join(self.app.user_data_dir, 'play_cache')
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            def prog(done, total):
+                pct = int(done * 100 / total) if total else 0
+                done_mb = round(done / 1048576, 1)
+                total_mb = round(total / 1048576, 1) if total else '?'
+                ui(lambda v=pct: setattr(self.progress, 'value', min(v, 99)))
+                ui(lambda d=done_mb, t=total_mb:
+                   setattr(self.status, 'text',
+                           '缓冲中：%s / %s MB' % (d, t)))
+
+            def log(line):
+                ui(lambda v=str(line)[-200:]:
+                   setattr(self.log_lbl, 'text', v))
+
+            # 复用现有下载逻辑（durl / DASH + MediaMerger 合并）
+            path = download_video(
+                part_info, cookie, quality, tmp_dir,
+                progress=prog, cancel=self.cancel, log=log
+            )
+
+            if self.cancel.is_set():
+                raise RuntimeError('已取消')
+
+            ui(lambda: setattr(self.status, 'text', '缓冲完成，正在打开播放器…'))
+            ui(lambda: setattr(self.progress, 'value', 100))
+            ui(lambda p=path: self._open_inapp_player(p))
+        except Exception as e:
+            err = str(e)
+            ui(lambda err=err: self._alert('在线播放失败：' + err))
+            ui(lambda: setattr(self.status, 'text', '在线播放失败'))
+        finally:
+            self.busy = False
+            ui(self._enable_play)
+
+    def _enable_play(self):
+        if hasattr(self, 'play_btn'):
+            self.play_btn.disabled = False
+        self._enable()
+
+    def _open_inapp_player(self, path):
+        """应用内全屏播放本地 MP4。"""
+        if not os.path.isfile(path):
+            self._alert('播放文件不存在')
+            return
+
+        # 关闭已有播放器
+        if getattr(self, '_player_popup', None):
+            try:
+                self._close_inapp_player()
+            except Exception:
+                pass
+
+        root = FloatLayout()
+        with root.canvas.before:
+            Color(0, 0, 0, 1)
+            root._bg = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda o, v: setattr(o._bg, 'pos', v),
+                  size=lambda o, v: setattr(o._bg, 'size', v))
+
+        try:
+            video = Video(
+                source=path,
+                state='play',
+                options={'allow_stretch': True, 'keep_ratio': True},
+                size_hint=(1, 1),
+                pos_hint={'x': 0, 'y': 0},
+            )
+        except Exception as e:
+            self._alert('无法创建播放器（请确认已打包 ffpyplayer）：' + str(e))
+            return
+
+        # 部分平台需要显式 volume
+        try:
+            video.volume = 1.0
+        except Exception:
+            pass
+
+        root.add_widget(video)
+        self._player_video = video
+
+        # 顶部控制条
+        bar = BoxLayout(
+            orientation='horizontal',
+            size_hint=(1, None),
+            height=dp(52),
+            pos_hint={'top': 1},
+            padding=[dp(10), dp(6)],
+            spacing=dp(8),
+        )
+        with bar.canvas.before:
+            Color(0, 0, 0, 0.55)
+            bar._bg = Rectangle(pos=bar.pos, size=bar.size)
+        bar.bind(pos=lambda o, v: setattr(o._bg, 'pos', v),
+                 size=lambda o, v: setattr(o._bg, 'size', v))
+
+        title = (self.info or {}).get('title', '正在播放')
+        if len(title) > 28:
+            title = title[:28] + '…'
+        bar.add_widget(self._label(title, 14, WHITE, 40, bold=True))
+
+        toggle = RoundButton(text='暂停', bg=PALE, fg=PINK,
+                             size_hint_x=None, width=dp(72))
+        close = RoundButton(text='关闭', bg=PINK, fg=WHITE,
+                            size_hint_x=None, width=dp(72))
+
+        def on_toggle(*_):
+            if video.state == 'play':
+                video.state = 'pause'
+                toggle.text = '播放'
+            else:
+                video.state = 'play'
+                toggle.text = '暂停'
+
+        toggle.bind(on_release=on_toggle)
+        close.bind(on_release=lambda *_: self._close_inapp_player())
+        bar.add_widget(toggle)
+        bar.add_widget(close)
+        root.add_widget(bar)
+
+        # 底部进度（可选，简单显示状态）
+        status_bar = BoxLayout(
+            size_hint=(1, None), height=dp(36),
+            pos_hint={'y': 0}, padding=[dp(12), 0],
+        )
+        with status_bar.canvas.before:
+            Color(0, 0, 0, 0.45)
+            status_bar._bg = Rectangle(pos=status_bar.pos, size=status_bar.size)
+        status_bar.bind(
+            pos=lambda o, v: setattr(o._bg, 'pos', v),
+            size=lambda o, v: setattr(o._bg, 'size', v),
+        )
+        self._player_status = self._label('播放中…', 12, WHITE, 32)
+        status_bar.add_widget(self._player_status)
+        root.add_widget(status_bar)
+
+        def on_eos(instance):
+            try:
+                self._player_status.text = '播放结束'
+                toggle.text = '播放'
+            except Exception:
+                pass
+
+        video.bind(on_eos=on_eos)
+
+        pop = Popup(
+            title='',
+            content=root,
+            size_hint=(1, 1),
+            auto_dismiss=False,
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 1),
+        )
+        # 去掉默认标题栏高度
+        try:
+            pop.title_size = 0
+        except Exception:
+            pass
+        self._player_popup = pop
+        pop.open()
+        self.status.text = '应用内播放中'
+
+    def _close_inapp_player(self):
+        video = getattr(self, '_player_video', None)
+        if video is not None:
+            try:
+                video.state = 'stop'
+                video.unload()
+            except Exception:
+                pass
+            self._player_video = None
+        pop = getattr(self, '_player_popup', None)
+        if pop is not None:
+            try:
+                pop.dismiss()
+            except Exception:
+                pass
+            self._player_popup = None
+        try:
+            self.status.text = '已关闭播放器'
+        except Exception:
+            pass
 
     def _download_attachment(self, mode):
         try:
@@ -640,6 +890,8 @@ class AppRoot(BoxLayout):
     def _enable(self):
         if hasattr(self, 'dl_btn'):
             self.dl_btn.disabled = False
+        if hasattr(self, 'play_btn'):
+            self.play_btn.disabled = False
         if hasattr(self, 'parse_btn'):
             self.parse_btn.disabled = False
 

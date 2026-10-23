@@ -137,3 +137,63 @@ def format_duration(seconds):
     try: seconds = int(seconds)
     except Exception: return '未知'
     return '%02d:%02d:%02d' % (seconds//3600, (seconds%3600)//60, seconds%60) if seconds >= 3600 else '%02d:%02d' % (seconds//60, seconds%60)
+
+
+def get_stream_sources(session, info, qn=0):
+    """
+    返回可下载的播放源，统一结构，供在线播放使用。
+    优先尝试一体流 (durl)，否则返回 DASH 的 video + audio。
+    """
+    qn = int(qn) if str(qn).isdigit() else 0
+    data = None
+    try:
+        data = _signed_playurl(session, info, qn or 127)
+    except Exception:
+        params = {
+            'cid': info['cid'], 'qn': qn or 80,
+            'fnval': 16, 'fnver': 0, 'fourk': 1
+        }
+        if info.get('bvid'):
+            params['bvid'] = info['bvid']
+        else:
+            params['avid'] = info.get('aid')
+        data = _api_json(session, API + '/x/player/playurl', params)
+
+    # 1) 一体流
+    durl = data.get('durl') or []
+    if durl:
+        item = durl[0]
+        urls = [item.get('url')] + list(item.get('backup_url') or [])
+        return {
+            'type': 'durl',
+            'urls': [u for u in urls if u],
+            'quality': int(data.get('quality') or qn or 0),
+        }
+
+    # 2) DASH
+    dash = data.get('dash') or {}
+    videos = dash.get('video') or []
+    audios = dash.get('audio') or []
+    if not videos:
+        raise BiliAPIError('没有可用的视频流')
+
+    video = None
+    if qn:
+        video = next((v for v in videos if int(v.get('id', 0)) == qn), None)
+    if video is None:
+        video = sorted(videos, key=lambda v: int(v.get('id', 0)), reverse=True)[0]
+
+    def stream_urls(s):
+        first = s.get('baseUrl') or s.get('base_url')
+        backup = s.get('backupUrl') or s.get('backup_url') or []
+        return [u for u in ([first] + list(backup)) if u]
+
+    result = {
+        'type': 'dash',
+        'video_urls': stream_urls(video),
+        'audio_urls': stream_urls(audios[0]) if audios else [],
+        'quality': int(video.get('id', 0)),
+    }
+    if not result['audio_urls']:
+        raise BiliAPIError('没有可用的音频流，无法在线播放')
+    return result
