@@ -5,11 +5,11 @@ package.name = bilibilidl
 package.domain = org.bilibilidl
 
 source.dir = .
-source.include_exts = py,png,jpg,jpeg,ttf,ttc,otf,kv,atlas,json,xml,java,txt,md
-source.include_patterns = *.png,*.jpg,*.jpeg,*.ttf,*.ttc,*.otf,*.kv,*.atlas,src/*,assets/*
+source.include_exts = py,png,jpg,jpeg,gif,webp,ttf,ttc,otf,kv,atlas,json,xml,java,txt,md,html,css,js,svg
+source.include_patterns = *.png,*.jpg,*.jpeg,*.gif,*.webp,*.ttf,*.ttc,*.otf,*.kv,*.atlas,*.html,*.css,*.js,*.svg,src/*,assets/*
 source.exclude_dirs = bin,.buildozer,__pycache__,.git
 
-version = 2.7.0
+version = 2.7.1
 
 orientation = portrait
 fullscreen = 0
@@ -26,16 +26,12 @@ android.ndk = 25c
 android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.enable_androidx = True
-
 android.add_src = src
 
-# 应用内播放用系统 WebView 打开官方播放器，无需 ExoPlayer / ffpyplayer
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,WRITE_EXTERNAL_STORAGE
-
 android.debuggable = True
 android.logcat_filters = *:S python:D
 
 [buildozer]
-
 log_level = 2
 warn_on_root = 1
