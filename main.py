@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""bilibilidl: native Android-oriented Bilibili downloader UI. 极致圆润UI最终版"""
+"""bilibilidl: native Android-oriented Bilibili downloader UI. 圆润UI + GIF动图下载修复"""
 import os
 import io
 import json
@@ -599,6 +599,8 @@ class AppRoot(BoxLayout):
             stem = (self.info.get('bvid') or
                     'av' + str(self.info.get('aid') or 'video'))
             page_num = int(selected.get('page') or 1)
+
+            # ==========【修复GIF/WebP动图下载：直接原始字节保存，不经过PIL转码】 ==========
             if mode == '封面图片':
                 url = self.info.get('pic')
                 if not url:
@@ -627,6 +629,14 @@ class AppRoot(BoxLayout):
                     else:
                         ext, mime = 'jpg', 'image/jpeg'
                 name = 'cover_%s.%s' % (stem, ext)
+                path = os.path.join(self._downloads_dir(), name)
+                # 直接写入原始网络二进制，保留GIF/WebP全部动画帧
+                with open(path, 'wb') as f:
+                    f.write(content)
+                self._add_history(name, path, mime, cover_url=(self.info or {}).get('pic',''))
+                ui(lambda: setattr(self.status, 'text', mode + '下载完成：' + name))
+                return
+
             elif mode == '弹幕 XML':
                 url = 'https://comment.bilibili.com/%s.xml' % selected.get('cid')
                 response = session.get(url, timeout=25)
