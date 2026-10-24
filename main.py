@@ -1330,20 +1330,37 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     })
 
                 task_id = str(int(time.time() * 1000))
-                selected = data.get('pages', 'all')
+selected = data.get('pages', 'all')
 
-                if selected == 'all':
-                    chosen = list(pages)
-                else:
-                    try:
-                        page_num = int(selected)
-                    except Exception:
-                        page_num = 1
+# 支持：全部分P、单个分P、多个分P编号列表
+if selected == 'all' or selected is None:
+    chosen = list(pages)
+elif isinstance(selected, list):
+    try:
+        page_numbers = {int(x) for x in selected}
+    except (TypeError, ValueError):
+        return self._reply({
+            'ok': False,
+            'error': '分P编号格式不正确'
+        })
 
-                    chosen = [
-                        x for x in pages
-                        if int(x.get('page') or 1) == page_num
-                    ]
+    chosen = [
+        p for p in pages
+        if int(p.get('page') or 1) in page_numbers
+    ]
+else:
+    try:
+        page_num = int(selected)
+    except (TypeError, ValueError):
+        return self._reply({
+            'ok': False,
+            'error': '分P编号不正确'
+        })
+
+    chosen = [
+        p for p in pages
+        if int(p.get('page') or 1) == page_num
+    ]
 
                 if not chosen:
                     return self._reply({
@@ -1360,6 +1377,14 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     )
                 except Exception:
                     qn = 0
+                    mode = str(data.get('mode') or 'video').strip().lower()
+
+allowed_modes = {'video', 'cover', 'danmaku', 'subtitle'}
+if mode not in allowed_modes:
+    return self._reply({
+        'ok': False,
+        'error': '不支持的下载类型'
+    })
 
                 out_dir = Path(app.user_data_dir) / 'downloads'
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -1418,23 +1443,154 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                         )
 
                             try:
-                                result = download_video(
-                                    part_info,
-                                    app.get_cookie() or '',
-                                    qn,
-                                    str(out_dir),
-                                    progress=progress,
-                                    cancel=cancel,
-                                    log=lambda msg: None
-                                )
+                                cookie = app.get_cookie() or ''
+                                dest = None
 
-                                # 不再只凭下载器返回的路径认定成功。
-                                verified = _verified_file(result)
-                                public_uri = _export_to_public_downloads(
-                                    verified
-                                )
+                                if mode == 'video':
+                                    result = download_video(
+                                        part_info,
+                                        cookie,
+                                        qn,
+                                        str(out_dir),
+                                        progress=progress,
+                                        cancel=cancel,
+                                        log=lambda msg: None
+                                    )
+                                    dest = _verified_file(result)
 
-                                display_path = str(verified)
+                                elif mode == 'cover':
+                                    pic = str(info.get('pic') or '')
+                                    if pic.startswith('//'):
+                                        pic = 'https:' + pic
+
+                                    if not pic.startswith(('https://', 'http://')):
+                                        raise RuntimeError('视频封面地址无效')
+
+                                    resp = requests.get(
+                                        pic,
+                                        timeout=(10, 30),
+                                        headers={
+                                            'Referer': 'https://www.bilibili.com/'
+                                        }
+                                    )
+                                    resp.raise_for_status()
+                                    raw = resp.content
+
+                                    if not raw or len(raw) > 20 * 1024 * 1024:
+                                        raise RuntimeError('封面为空或文件过大')
+
+                                    if raw.startswith((b'GIF87a', b'GIF89a')):
+                                        ext = 'gif'
+                                    elif raw.startswith(b'\x89PNG\r\n\x1a\n'):
+                                        ext = 'png'
+                                    elif raw.startswith(b'\xff\xd8\xff'):
+                                        ext = 'jpg'
+                                    elif raw.startswith(b'RIFF') and raw[8:12] == b'WEBP':
+                                        ext = 'webp'
+                                    else:
+                                        raise RuntimeError('无法识别封面格式')
+
+                                    dest = out_dir / (
+                                        str(info.get('bvid') or info.get('aid') or 'video')
+                                        + '_cover.' + ext
+                                    )
+                                    dest.write_bytes(raw)
+                                    dest = _verified_file(dest)
+
+                                elif mode == 'danmaku':
+                                    session = new_session(cookie)
+                                    resp = session.get(
+                                        'https://comment.bilibili.com/%s.xml' % cid,
+                                        timeout=(10, 30)
+                                    )
+                                    resp.raise_for_status()
+                                    raw = resp.content
+
+                                    if not raw or b'<i' not in raw[:1000]:
+                                        raise RuntimeError('该分P没有可用弹幕 XML')
+
+                                    dest = out_dir / (
+                                        str(info.get('bvid') or info.get('aid') or 'video')
+                                        + '_P%d_danmaku.xml' % page_no
+                                    )
+                                    dest.write_bytes(raw)
+                                    dest = _verified_file(dest)
+
+                                elif mode == 'subtitle':
+                                    session = new_session(cookie)
+                                    params = {'cid': cid}
+
+                                    if info.get('bvid'):
+                                        params['bvid'] = info['bvid']
+                                    elif info.get('aid'):
+                                        params['aid'] = info['aid']
+
+                                    resp = session.get(
+                                        'https://api.bilibili.com/x/player/v2',
+                                        params=params,
+                                        timeout=(10, 25)
+                                    )
+                                    resp.raise_for_status()
+                                    jdata = resp.json()
+
+                                    subs = (
+                                        ((jdata.get('data') or {}).get('subtitle') or {})
+                                        .get('subtitles') or []
+                                    )
+                                    if not subs:
+                                        raise RuntimeError('该分P没有可用字幕')
+
+                                    sub_url = subs[0].get('subtitle_url') or ''
+                                    if sub_url.startswith('//'):
+                                        sub_url = 'https:' + sub_url
+
+                                    if not sub_url.startswith('https://'):
+                                        raise RuntimeError('字幕地址无效')
+
+                                    sr = session.get(sub_url, timeout=(10, 25))
+                                    sr.raise_for_status()
+                                    subtitle_data = sr.json()
+                                    subtitle_lines = []
+
+                                    def srt_stamp(value):
+                                        sec = max(0.0, float(value or 0))
+                                        whole = int(sec)
+                                        ms = int((sec - whole) * 1000)
+                                        return '%02d:%02d:%02d,%03d' % (
+                                            whole // 3600,
+                                            (whole % 3600) // 60,
+                                            whole % 60,
+                                            ms
+                                        )
+
+                                    for line_no, item in enumerate(
+                                        subtitle_data.get('body') or [], 1
+                                    ):
+                                        subtitle_lines.extend([
+                                            str(line_no),
+                                            srt_stamp(item.get('from'))
+                                            + ' --> '
+                                            + srt_stamp(item.get('to')),
+                                            str(item.get('content') or ''),
+                                            ''
+                                        ])
+
+                                    if not subtitle_lines:
+                                        raise RuntimeError('字幕内容为空')
+
+                                    dest = out_dir / (
+                                        str(info.get('bvid') or info.get('aid') or 'video')
+                                        + '_P%d.srt' % page_no
+                                    )
+                                    dest.write_text(
+                                        '\n'.join(subtitle_lines),
+                                        encoding='utf-8-sig'
+                                    )
+                                    dest = _verified_file(dest)
+
+                                public_uri = _export_to_public_downloads(dest)
+
+                                display_path = str(dest)
                                 if public_uri.startswith('content://'):
                                     display_path += ' | ' + public_uri
 
@@ -1442,6 +1598,11 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                     task = _BRIDGE_TASKS.get(task_id)
                                     if task:
                                         task['files'].append(display_path)
+
+                            except Exception as exc:
+                                failures.append(
+                                    'P%d：%s' % (page_no, safe_text(exc, 220))
+                                )
 
                             except Exception as exc:
                                 failures.append(
