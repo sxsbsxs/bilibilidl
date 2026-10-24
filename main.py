@@ -1828,24 +1828,31 @@ class BiliDlApp(App):
     def open_html_frontend(self, html_file):
         try:
             from jnius import autoclass
+            from android.runnable import run_on_ui_thread
 
             PythonActivity = autoclass(
                 'org.kivy.android.PythonActivity'
             )
             Bridge = autoclass('org.bilibilidl.WebAppBridge')
-            uri = 'file://' + str(html_file.resolve())
 
-            Bridge.open(
-                PythonActivity.mActivity,
-                uri,
-                'http://127.0.0.1:18765/api'
-            )
+            uri = 'file://' + str(html_file.resolve())
+            activity = PythonActivity.mActivity
+
+            @run_on_ui_thread
+            def show_webview():
+                Bridge.open(
+                    activity,
+                    uri,
+                    'http://127.0.0.1:18765/api'
+                )
+
+            show_webview()
 
         except Exception as exc:
             try:
                 self.home.result_label.text = (
-                    'HTML 界面启动失败，已保留原生界面：'
-                    + safe_text(exc, 180)
+                    'HTML 界面启动失败：'
+                    + safe_text(exc, 300)
                 )
             except Exception:
                 pass
