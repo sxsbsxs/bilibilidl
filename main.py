@@ -1330,37 +1330,37 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     })
 
                 task_id = str(int(time.time() * 1000))
-selected = data.get('pages', 'all')
+                selected = data.get('pages', 'all')
 
-# 支持：全部分P、单个分P、多个分P编号列表
-if selected == 'all' or selected is None:
-    chosen = list(pages)
-elif isinstance(selected, list):
-    try:
-        page_numbers = {int(x) for x in selected}
-    except (TypeError, ValueError):
-        return self._reply({
-            'ok': False,
-            'error': '分P编号格式不正确'
-        })
+                # 支持：全部分P、单个分P、多个分P编号列表
+                if selected == 'all' or selected is None:
+                    chosen = list(pages)
+                elif isinstance(selected, list):
+                    try:
+                        page_numbers = {int(x) for x in selected}
+                    except (TypeError, ValueError):
+                        return self._reply({
+                            'ok': False,
+                            'error': '分P编号格式不正确'
+                        })
 
-    chosen = [
-        p for p in pages
-        if int(p.get('page') or 1) in page_numbers
-    ]
-else:
-    try:
-        page_num = int(selected)
-    except (TypeError, ValueError):
-        return self._reply({
-            'ok': False,
-            'error': '分P编号不正确'
-        })
+                    chosen = [
+                        p for p in pages
+                        if int(p.get('page') or 1) in page_numbers
+                    ]
+                else:
+                    try:
+                        page_num = int(selected)
+                    except (TypeError, ValueError):
+                        return self._reply({
+                            'ok': False,
+                            'error': '分P编号不正确'
+                        })
 
-    chosen = [
-        p for p in pages
-        if int(p.get('page') or 1) == page_num
-    ]
+                    chosen = [
+                        p for p in pages
+                        if int(p.get('page') or 1) == page_num
+                    ]
 
                 if not chosen:
                     return self._reply({
@@ -1377,14 +1377,15 @@ else:
                     )
                 except Exception:
                     qn = 0
-                    mode = str(data.get('mode') or 'video').strip().lower()
 
-allowed_modes = {'video', 'cover', 'danmaku', 'subtitle'}
-if mode not in allowed_modes:
-    return self._reply({
-        'ok': False,
-        'error': '不支持的下载类型'
-    })
+                mode = str(data.get('mode') or 'video').strip().lower()
+                allowed_modes = {'video', 'cover', 'danmaku', 'subtitle'}
+
+                if mode not in allowed_modes:
+                    return self._reply({
+                        'ok': False,
+                        'error': '不支持的下载类型'
+                    })
 
                 out_dir = Path(app.user_data_dir) / 'downloads'
                 out_dir.mkdir(parents=True, exist_ok=True)
