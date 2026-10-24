@@ -1788,74 +1788,97 @@ class _BridgeServer:
 
 class BiliDlApp(App):
     def build(self):
-        self.title = APP_NAME
-        self.cookie_data = ''
-        self.profile_data = {}
-        self.cookie_file = (
-            Path(self.user_data_dir) / 'cookie_store.json'
-        )
+    self.title = APP_NAME
+    self.cookie_data = ''
+    self.profile_data = {}
+    self.cookie_file = (
+        Path(self.user_data_dir) / 'cookie_store.json'
+    )
 
-        self.sm = ScreenManager()
-        self.home = HomeScreen(self, name='home')
-        self.sm.add_widget(self.home)
+    self.sm = ScreenManager()
+    self.home = HomeScreen(self, name='home')
+    self.sm.add_widget(self.home)
 
-        self.load_cookie_local()
+    self.load_cookie_local()
 
-        self._bridge_last_info = None
-        self._bridge_last_pages = []
-        self._bridge_last_qualities = []
+    self._bridge_last_info = None
+    self._bridge_last_pages = []
+    self._bridge_last_qualities = []
 
-        self._bridge_server = _BridgeServer(self)
-        self._bridge_server.start()
+    self._bridge_server = _BridgeServer(self)
+    self._bridge_server.start()
 
-        if platform == 'android':
-            try:
-                preload_merger()
-            except Exception:
-                pass
+    if platform == 'android':
+        try:
+            preload_merger()
+        except Exception:
+            pass
 
-            # 存在 index.html 时优先打开 HTML 界面；
-            # HTML 启动失败仍保留原生 Kivy 界面。
-            html_file = BASE_DIR / 'index.html'
-            if html_file.is_file():
-                Clock.schedule_once(
-                    lambda _dt: self.open_html_frontend(html_file),
-                    0.8
-                )
+        html_file = BASE_DIR / 'index.html'
+        splash_file = BASE_DIR / 'bilibilidl加载图.png'
+
+        if html_file.is_file() and splash_file.is_file():
+            self._startup_view = FloatLayout()
+
+            self._startup_image = Image(
+                source=str(splash_file),
+                allow_stretch=True,
+                keep_ratio=False,
+                size_hint=(1, 1),
+                pos_hint={'x': 0, 'y': 0}
+            )
+            self._startup_view.add_widget(
+                self._startup_image
+            )
+
+            Clock.schedule_once(
+                lambda _dt: self.open_html_frontend(html_file),
+                0.25
+            )
+
+            return self._startup_view
 
         return self.sm
 
-    def open_html_frontend(self, html_file):
-        try:
-            from jnius import autoclass
-            from android.runnable import run_on_ui_thread
+    return self.sm
 
-            PythonActivity = autoclass(
-                'org.kivy.android.PythonActivity'
+def open_html_frontend(self, html_file):
+    try:
+        from jnius import autoclass
+        from android.runnable import run_on_ui_thread
+
+        PythonActivity = autoclass(
+            'org.kivy.android.PythonActivity'
+        )
+        Bridge = autoclass(
+            'org.bilibilidl.WebAppBridge'
+        )
+
+        activity = PythonActivity.mActivity
+        html_uri = Path(html_file).resolve().as_uri()
+        api_url = 'http://127.0.0.1:18765/api'
+
+        @run_on_ui_thread
+        def show_webview():
+            Bridge.open(
+                activity,
+                html_uri,
+                api_url
             )
-            Bridge = autoclass('org.bilibilidl.WebAppBridge')
 
-            uri = 'file://' + str(html_file.resolve())
-            activity = PythonActivity.mActivity
+        show_webview()
 
-            @run_on_ui_thread
-            def show_webview():
-                Bridge.open(
-                    activity,
-                    uri,
-                    'http://127.0.0.1:18765/api'
-                )
+    except Exception as exc:
+        message = (
+            'HTML 界面启动失败：'
+            + safe_text(exc, 300)
+        )
 
-            show_webview()
-
-        except Exception as exc:
-            try:
-                self.home.result_label.text = (
-                    'HTML 界面启动失败：'
-                    + safe_text(exc, 300)
-                )
-            except Exception:
-                pass
+        try:
+            self.home.result_label.text = message
+            self.root = self.sm
+        except Exception:
+            pass
 
     def get_cookie(self):
         return self.cookie_data or ''
