@@ -1819,7 +1819,6 @@ class BiliDlApp(App):
 
         if html_file.is_file() and splash_file.is_file():
             self._startup_view = FloatLayout()
-
             self._startup_image = Image(
                 source=str(splash_file),
                 allow_stretch=True,
@@ -1835,7 +1834,6 @@ class BiliDlApp(App):
                 lambda _dt: self.open_html_frontend(html_file),
                 0.25
             )
-
             return self._startup_view
 
         return self.sm
@@ -1860,11 +1858,7 @@ def open_html_frontend(self, html_file):
 
         @run_on_ui_thread
         def show_webview():
-            Bridge.open(
-                activity,
-                html_uri,
-                api_url
-            )
+            Bridge.open(activity, html_uri, api_url)
 
         show_webview()
 
@@ -1873,15 +1867,14 @@ def open_html_frontend(self, html_file):
             'HTML 界面启动失败：'
             + safe_text(exc, 300)
         )
-
         try:
             self.home.result_label.text = message
             self.root = self.sm
         except Exception:
             pass
 
-    def get_cookie(self):
-        return self.cookie_data or ''
+def get_cookie(self):
+    return self.cookie_data or ''
 
     @mainthread
     def save_cookie_local(self, cookie, profile):
