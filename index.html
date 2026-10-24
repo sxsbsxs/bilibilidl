@@ -394,7 +394,6 @@ function bytes(value) {
 
 window.addEventListener('load', () => {
   const result = nativeCall({action:'ping'});
-  if (!result.ok) toast('浏览器预览模式：下载功能需要 APK 本地后端');
   refreshAccount();
   refreshHistory();
 });
