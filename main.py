@@ -29,10 +29,14 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
-from kivy.uix.progressbar import ProgressBar
+from kivy.properties import NumericProperty
 from kivy.uix.image import Image, AsyncImage
 from kivy.uix.widget import Widget
 from kivy.graphics import Color, RoundedRectangle, Ellipse, Line
+from kivy.config import Config
+
+# Force a light application theme: prevent Kivy/native controls inheriting dark defaults.
+Config.set('graphics', 'clearcolor', '0.965, 0.961, 0.969, 1')
 
 from bili_api import new_session, get_video_info, get_play_info
 from login_manager import qr_generate, qr_poll, validate_login
@@ -89,31 +93,30 @@ def _verified_file(path):
 
 
 def _export_to_public_downloads(path):
-    """将文件导出到 Android 的 Download/bilibilidl 目录。"""
+    """导出到公共 Download 目录；失败时明确保留私有目录文件。"""
     source = _verified_file(path)
     if platform != 'android':
         return str(source)
     try:
         from jnius import autoclass
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        MediaMerger = autoclass('org.bilibilidl.MediaMerger')
-        result = str(
-            MediaMerger.exportToDownloads(
-                PythonActivity.mActivity,
-                str(source.resolve()),
-                source.name
-            )
-        )
+        try:
+            MediaMerger = autoclass('org.bilibilidl.MediaMerger')
+        except Exception as exc:
+            raise RuntimeError(
+                '当前 APK 未包含 org.bilibilidl.MediaMerger，'
+                '无法导出到公共 Download 目录'
+            ) from exc
+        result = str(MediaMerger.exportToDownloads(
+            PythonActivity.mActivity, str(source.resolve()), source.name
+        ))
         if result.startswith('content://'):
             return result
-        raise RuntimeError(
-            result or '导出接口没有返回成功地址'
-        )
+        raise RuntimeError(result or '导出接口没有返回成功地址')
     except Exception as exc:
         raise RuntimeError(
-            '文件已生成，但导出到 Download/bilibilidl 失败。'
-            '原文件仍在应用私有目录：' + str(source)
-            + '；错误：' + safe_text(exc, 180)
+            '下载文件已生成，但公共目录导出失败。原文件仍保存在应用私有目录：'
+            + str(source) + '。原因：' + safe_text(exc, 180)
         )
 
 
@@ -128,10 +131,11 @@ def fmt_duration(value):
 
 
 def ui_label(text='', size=14, color=INK, height=None,
-             bold=False, halign='left'):
+             bold=True, halign='left'):
     lab = Label(
         text=safe_text(text),
-        font_name=FONT_BOLD_NAME if bold else FONT,
+        font_name=FONT_BOLD_NAME,
+        bold=True,
         font_size=dp(size),
         color=color,
         halign=halign,
@@ -142,7 +146,7 @@ def ui_label(text='', size=14, color=INK, height=None,
         lab.height = dp(height)
     lab.bind(
         size=lambda obj, val: setattr(
-            obj, 'text_size', (max(1, val[0]), None)
+            obj, 'text_size', (max(1, val[0]), max(1, val[1]))
         )
     )
     return lab
@@ -188,7 +192,7 @@ class PinkButton(Button):
         self.background_down = ''
         self.background_color = (0, 0, 0, 0)
         self.color = fg
-        self.font_name = FONT
+        self.font_name = FONT_BOLD_NAME
         self.font_size = dp(14)
         self.bold = True
         with self.canvas.before:
@@ -204,24 +208,70 @@ class PinkButton(Button):
 
 
 class PinkInput(TextInput):
+    """High-contrast input with a visible outline and reliable touch focus."""
     def __init__(self, **kwargs):
+        kwargs.setdefault('multiline', False)
+        kwargs.setdefault('write_tab', False)
         super().__init__(**kwargs)
         self.background_normal = ''
         self.background_active = ''
         self.background_color = (0, 0, 0, 0)
         self.foreground_color = INK
+        self.hint_text_color = (0.48, 0.49, 0.54, 1)
         self.cursor_color = PINK
-        self.font_name = FONT
+        self.selection_color = (0.98, 0.68, 0.78, 0.75)
+        self.font_name = FONT_BOLD_NAME
+        self.bold = True
         self.font_size = dp(15)
-        self.padding = [dp(15), dp(15), dp(15), dp(11)]
+        self.padding = [dp(14), dp(12), dp(14), dp(10)]
+        self.size_hint_y = None
+        self.height = dp(50)
         with self.canvas.before:
             Color(1, 1, 1, 1)
-            self._input_bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
-        self.bind(pos=self._sync_input, size=self._sync_input)
+            self._input_bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(14)])
+            self._focus_color = Color(*BORDER)
+            self._input_edge = Line(rounded_rectangle=(self.x, self.y, self.width, self.height, dp(14)), width=1.15)
+        self.bind(pos=self._sync_input, size=self._sync_input, focus=self._sync_focus)
+        self._sync_focus()
 
     def _sync_input(self, *_):
         self._input_bg.pos = self.pos
         self._input_bg.size = self.size
+        self._input_edge.rounded_rectangle = (self.x, self.y, self.width, self.height, dp(14))
+
+    def _sync_focus(self, *_):
+        self._focus_color.rgba = PINK if self.focus else BORDER
+        self._input_edge.width = 1.7 if self.focus else 1.15
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            self.focus = True
+        return super().on_touch_down(touch)
+
+
+class PinkProgressBar(Widget):
+    """Thick rounded pink progress bar; never uses Kivy's default blue style."""
+    value = NumericProperty(0)
+    max = NumericProperty(100)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.size_hint_y = None
+        self.height = dp(18)
+        with self.canvas:
+            Color(1.0, 0.82, 0.88, 1)
+            self._track = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(9)])
+            Color(*PINK)
+            self._fill = RoundedRectangle(pos=self.pos, size=(0, self.height), radius=[dp(9)])
+        self.bind(pos=self._sync, size=self._sync, value=self._sync, max=self._sync)
+        self._sync()
+
+    def _sync(self, *_):
+        self._track.pos = self.pos
+        self._track.size = self.size
+        ratio = 0 if self.max <= 0 else max(0.0, min(1.0, float(self.value) / float(self.max)))
+        self._fill.pos = self.pos
+        self._fill.size = (self.width * ratio, self.height)
 
 
 class SafeAvatar(BoxLayout):
@@ -264,6 +314,11 @@ class ChoicePopup(Popup):
             auto_dismiss=True,
             **kwargs
         )
+        self.background = ''
+        self.background_color = WHITE
+        self.title_color = INK
+        self.separator_color = PALE
+        self.title_font = FONT_BOLD_NAME
         self.callback = callback
         root = BoxLayout(
             orientation='vertical',
@@ -314,6 +369,11 @@ class LoginPopup(Popup):
             auto_dismiss=True,
             **kwargs
         )
+        self.background = ''
+        self.background_color = WHITE
+        self.title_color = INK
+        self.separator_color = PALE
+        self.title_font = FONT_BOLD_NAME
         self.app_ref = app
         self.qr_key = None
         self.stop_event = threading.Event()
@@ -419,22 +479,52 @@ class Toast(Popup):
                          height=dp(72), auto_dismiss=True, **kwargs)
         self.background = ''
         self.background_color = (0, 0, 0, 0)
-        self.content = Card(bg=INK, radius=dp(18), padding=[dp(14), dp(8), dp(14), dp(8)])
-        self.content.add_widget(ui_label(safe_text(message, 160), 13, WHITE, 46, halign='center'))
+        self.content = Card(bg=PALE, radius=dp(18), padding=[dp(14), dp(8), dp(14), dp(8)])
+        self.content.add_widget(ui_label(safe_text(message, 160), 13, INK, 46, halign='center'))
         Clock.schedule_once(lambda _dt: self.dismiss(), 1.8)
 
 
+_active_toast = None
+_toast_lock = threading.RLock()
+
+
 def show_toast(message):
+    """Toast 采用单实例策略，连续提示时替换旧提示，避免弹窗堆叠。"""
+    def _show(_dt=0):
+        global _active_toast
+        try:
+            with _toast_lock:
+                if _active_toast is not None:
+                    try:
+                        _active_toast.dismiss()
+                    except Exception:
+                        pass
+                _active_toast = Toast(message)
+                _active_toast.open()
+        except Exception:
+            pass
     try:
-        Toast(message).open()
+        Clock.schedule_once(_show, 0)
     except Exception:
         pass
+
+
+def apply_screen_background(screen, color=BG):
+    """Paint every page explicitly so Android never shows the default black canvas."""
+    with screen.canvas.before:
+        Color(*color)
+        screen._page_background = RoundedRectangle(pos=screen.pos, size=screen.size, radius=[0])
+    def sync(*_):
+        screen._page_background.pos = screen.pos
+        screen._page_background.size = screen.size
+    screen.bind(pos=sync, size=sync)
 
 
 class DownloadedScreen(Screen):
     def __init__(self, app, **kwargs):
         super().__init__(**kwargs)
         self.app_ref = app
+        apply_screen_background(self)
         self.files_box = BoxLayout(orientation='vertical', spacing=dp(10), size_hint_y=None)
         self.files_box.bind(minimum_height=self.files_box.setter('height'))
         root = BoxLayout(orientation='vertical', padding=[dp(17), dp(16), dp(17), dp(10)], spacing=dp(12))
@@ -452,7 +542,23 @@ class DownloadedScreen(Screen):
         self.files_box.clear_widgets()
         folder = Path(self.app_ref.user_data_dir) / 'downloads'
         try:
-            files = sorted([x for x in folder.iterdir() if x.is_file() and x.stat().st_size > 0], key=lambda x: x.stat().st_mtime, reverse=True) if folder.exists() else []
+            # 忽略下载器尚未完成写入的临时文件，并限制扫描范围，降低大目录卡顿。
+            ignored_suffixes = ('.tmp', '.part', '.partial', '.download', '.crdownload')
+            candidates = []
+            if folder.exists():
+                for item in folder.iterdir():
+                    try:
+                        if (not item.is_file()
+                                or item.name.startswith('.')
+                                or item.name.lower().endswith(ignored_suffixes)):
+                            continue
+                        stat = item.stat()
+                        if stat.st_size > 0:
+                            candidates.append((stat.st_mtime, item, stat.st_size))
+                    except (OSError, PermissionError):
+                        continue
+            candidates.sort(key=lambda entry: entry[0], reverse=True)
+            files = [(item, size, mtime) for mtime, item, size in candidates[:500]]
         except Exception:
             files = []
         if not files:
@@ -462,15 +568,14 @@ class DownloadedScreen(Screen):
             empty.add_widget(ui_label('解析并下载一个视频后，文件会出现在这里。', 12, GRAY, 44, halign='center'))
             self.files_box.add_widget(empty)
             return
-        for f in files[:500]:
+        for f, size, mtime in files:
             try:
-                size=f.stat().st_size
                 size_text = ('%.1f MB' % (size/1048576)) if size >= 1048576 else ('%.0f KB' % (size/1024))
             except Exception:
                 size_text='大小未知'
             card=Card(bg=WHITE, radius=dp(17), padding=[dp(13), dp(10), dp(13), dp(10)], spacing=dp(4), size_hint_y=None)
             card.add_widget(ui_label(f.name, 13, INK, 42, bold=True))
-            card.add_widget(ui_label(size_text + '  ·  ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(f.stat().st_mtime)), 11, GRAY, 22))
+            card.add_widget(ui_label(size_text + '  ·  ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime)), 11, GRAY, 22))
             btn=PinkButton(text='查看保存路径', bg=PALE, fg=PINK, size_hint_y=None, height=dp(38))
             btn.bind(on_release=lambda _b, path=str(f): Popup(title='文件位置', content=ui_label(path, 12, INK, 80), size_hint=(.9,.32)).open())
             card.add_widget(btn)
@@ -481,6 +586,7 @@ class ProfileScreen(Screen):
     def __init__(self, app, **kwargs):
         super().__init__(**kwargs)
         self.app_ref=app
+        apply_screen_background(self)
         self.body=BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None)
         self.body.bind(minimum_height=self.body.setter('height'))
         root=BoxLayout(orientation='vertical', padding=[dp(17),dp(16),dp(17),dp(10)], spacing=dp(12))
@@ -496,7 +602,7 @@ class ProfileScreen(Screen):
         name=safe_text(profile.get('uname') or '尚未登录',40)
         uid=profile.get('mid') or profile.get('uid')
         account=Card(bg=WHITE,radius=dp(22),padding=[dp(17),dp(16),dp(17),dp(16)],spacing=dp(6),size_hint_y=None)
-        account.add_widget(ui_label('◉',30,PINK,42,halign='center',bold=True))
+        account.add_widget(ui_label('头像',12,PINK,42,halign='center',bold=True))
         account.add_widget(ui_label(name,19,INK,32,bold=True,halign='center'))
         account.add_widget(ui_label(('UID '+str(uid)) if uid else ('登录 B 站以查看授权账号信息'),12,GRAY,25,halign='center'))
         login=PinkButton(text='B站授权登录' if not self.app_ref.get_cookie() else '账号登录状态',bg=PALE,fg=PINK,size_hint_y=None,height=dp(44))
@@ -504,21 +610,21 @@ class ProfileScreen(Screen):
         account.add_widget(login); self.body.add_widget(account)
         folder=Path(self.app_ref.user_data_dir)/'downloads'
         try:
-            files=[x for x in folder.iterdir() if x.is_file() and x.stat().st_size>0] if folder.exists() else []
+            files=[x for x in folder.iterdir() if x.is_file() and x.stat().st_size>0 and not x.name.startswith('.') and not x.name.lower().endswith(('.tmp','.part','.partial','.download','.crdownload'))] if folder.exists() else []
             total=sum(x.stat().st_size for x in files)
         except Exception:
             files=[]; total=0
         size=('%.2f GB'%(total/1073741824)) if total>=1073741824 else ('%.1f MB'%(total/1048576))
-        stats=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(15),dp(15),dp(15)],spacing=dp(8),size_hint_y=None)
+        stats=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(15),dp(15),dp(15)],spacing=dp(8),size_hint_y=None,height=dp(150))
         stats.add_widget(ui_label('本地下载统计',16,INK,28,bold=True))
-        row=BoxLayout(size_hint_y=None,height=dp(72),spacing=dp(8))
+        row=BoxLayout(size_hint_y=None,height=dp(76),spacing=dp(8))
         for value,label in [(str(len(files)),'文件数量'),(size,'占用空间')]:
-            tile=Card(bg=PALE,radius=dp(15),padding=[dp(8),dp(8),dp(8),dp(8)],spacing=dp(2))
+            tile=Card(bg=PALE,radius=dp(15),padding=[dp(8),dp(7),dp(8),dp(7)],spacing=dp(2),size_hint_y=1)
             tile.add_widget(ui_label(value,17,PINK,28,bold=True,halign='center'))
             tile.add_widget(ui_label(label,11,GRAY,22,halign='center'))
             row.add_widget(tile)
         stats.add_widget(row); self.body.add_widget(stats)
-        settings=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(14),dp(15),dp(14)],spacing=dp(7),size_hint_y=None)
+        settings=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(14),dp(15),dp(14)],spacing=dp(7),size_hint_y=None,height=dp(190))
         settings.add_widget(ui_label('应用信息',16,INK,28,bold=True))
         settings.add_widget(ui_label('bilibilidl · 本地下载工具',13,GRAY,24))
         settings.add_widget(ui_label('文件默认保存在应用本地目录；导出文件位于 Download/bilibilidl。',12,GRAY,45))
@@ -577,8 +683,8 @@ class HomeScreen(Screen):
         hero.add_widget(ui_label('VIDEO  /  DOWNLOADER', 10, PINK, 20, bold=True))
         hero.add_widget(ui_label('把喜欢的视频，\n认真保存下来。', 23, INK, 62, bold=True))
         hero.add_widget(ui_label('支持 BV 号、AV 号、视频链接与 b23.tv 短链', 12, GRAY, 24))
-        input_shell = BoxLayout(size_hint_y=None, height=dp(54), padding=[dp(2), dp(2), dp(2), dp(2)])
-        self.link_input = PinkInput(hint_text='粘贴视频链接、BV 号或 AV 号…', multiline=False, size_hint_y=None, height=dp(50))
+        input_shell = BoxLayout(size_hint_y=None, height=dp(58), padding=[dp(1), dp(1), dp(1), dp(1)])
+        self.link_input = PinkInput(hint_text='点此输入或粘贴视频链接、BV 号、AV 号…', multiline=False, size_hint=(1, 1), height=dp(56))
         input_shell.add_widget(self.link_input)
         hero.add_widget(input_shell)
         self.parse_btn = PinkButton(text='解析视频  →', bg=PINK, fg=WHITE, size_hint_y=None, height=dp(50))
@@ -639,11 +745,21 @@ class HomeScreen(Screen):
         # Task panel
         task_card = Card(bg=WHITE, radius=dp(19), padding=[dp(16), dp(14), dp(16), dp(16)], spacing=dp(9), size_hint_y=None)
         task_card.bind(minimum_height=task_card.setter('height'))
-        task_card.add_widget(ui_label('下载任务', 16, INK, 26, bold=True))
+        task_card.add_widget(ui_label('下载任务', 16, INK, 28, bold=True))
+        task_info = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(94), spacing=dp(11))
+        self.task_cover = Image(size_hint=(None, 1), width=dp(112), allow_stretch=True, keep_ratio=True)
+        task_info.add_widget(self.task_cover)
+        task_meta = BoxLayout(orientation='vertical', spacing=dp(4))
+        self.task_video_title = ui_label('尚未选择视频', 14, INK, 52, bold=True)
+        self.task_video_owner = ui_label('解析视频后显示封面与 UP 主信息', 11, GRAY, 34, bold=True)
+        task_meta.add_widget(self.task_video_title)
+        task_meta.add_widget(self.task_video_owner)
+        task_info.add_widget(task_meta)
+        task_card.add_widget(task_info)
         self.download_btn = PinkButton(text='开始下载  →', size_hint_y=None, height=dp(54))
         self.download_btn.bind(on_release=self.start_download)
         task_card.add_widget(self.download_btn)
-        self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
+        self.progress = PinkProgressBar(max=100, value=0, size_hint_y=None, height=dp(18))
         task_card.add_widget(self.progress)
         self.task_label = ui_label('准备就绪 · 下载完成后保存到 Download/bilibilidl', 12, GRAY, 42)
         task_card.add_widget(self.task_label)
@@ -759,6 +875,7 @@ class HomeScreen(Screen):
                     self.title_label.text = safe_text(
                         info.get('title'), 180
                     )
+                    self.task_video_title.text = safe_text(info.get('title') or '未获取到标题', 100)
                     owner = info.get('owner') or {}
                     owner_name = (
                         owner.get('name')
@@ -769,6 +886,7 @@ class HomeScreen(Screen):
                         + '    时长：'
                         + fmt_duration(info.get('duration'))
                     )
+                    self.task_video_owner.text = 'UP主：' + safe_text(owner_name, 70) + ' · ' + fmt_duration(info.get('duration'))
                     self.quality_btn.text = (
                         '清晰度：' + qlist[0][1]
                         + (' (%s)' % qlist[0][0] if qlist[0][0] else '')
@@ -777,8 +895,10 @@ class HomeScreen(Screen):
                     if cover:
                         try:
                             self._set_cover_preview(cover)
+                            self.task_cover.texture = CoreImage(io.BytesIO(cover)).texture
                         except Exception:
                             self.cover_preview.source = ''
+                            self.task_cover.source = cover_url
                     self.result_label.text = (
                         '解析成功：%d 个分P。可选择单P或全部分P。'
                         % len(pages)
@@ -1183,11 +1303,20 @@ class HomeScreen(Screen):
                     self.download_btn.disabled = False
                     self.parse_btn.disabled = False
                     self.cancel_btn.disabled = True
-                    try:
-                        self.app_ref.downloaded.refresh_files()
-                        self.app_ref.profile.refresh_profile()
-                    except Exception:
-                        pass
+                    # 页面由 App.build() 统一创建；分别刷新，避免一个页面刷新失败
+                    # 导致另一个页面也跳过。进入对应 tab 时仍会再次刷新兜底。
+                    for screen_name, refresh_name in (
+                            ('downloaded', 'refresh_files'),
+                            ('profile', 'refresh_profile')):
+                        try:
+                            screen = getattr(self.app_ref, screen_name, None)
+                            refresh = getattr(screen, refresh_name, None)
+                            if callable(refresh):
+                                refresh()
+                        except Exception as refresh_exc:
+                            # 保留下载结果，不把刷新失败伪装成下载失败。
+                            print('[bilibilidl] %s refresh failed: %s' % (
+                                screen_name, safe_text(refresh_exc, 180)))
                 finish()
         threading.Thread(
             target=worker, daemon=True, name='bili-download'
@@ -1732,6 +1861,12 @@ class _BridgeServer:
 class BiliDlApp(App):
     """纯 Kivy 原生界面入口：不再加载 HTML/WebView，避免启动后闪退。"""
     def build(self):
+        try:
+            from kivy.core.window import Window
+            Window.clearcolor = BG
+            Window.clearcolor = (0.965, 0.961, 0.969, 1)
+        except Exception:
+            pass
         self.title = APP_NAME
         self.cookie_data = ''
         self.profile_data = {}
@@ -1747,7 +1882,7 @@ class BiliDlApp(App):
         shell.add_widget(self.sm)
         nav = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(8), dp(5), dp(8), dp(5)], spacing=dp(6))
         self.nav_buttons = {}
-        for key, label in [('home','⌂  首页'),('downloaded','▤  已下载'),('profile','◉  我的')]:
+        for key, label in [('home','首页'),('downloaded','已下载'),('profile','我的')]:
             btn = PinkButton(text=label, bg=WHITE, fg=GRAY, size_hint_x=1, height=dp(54))
             btn.bind(on_release=lambda _b, dest=key: self.navigate(dest))
             self.nav_buttons[key]=btn
