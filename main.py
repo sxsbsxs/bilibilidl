@@ -1788,10 +1788,10 @@ class _BridgeServer:
 
 class BiliDlApp(App):
     def build(self):
-    self.title = APP_NAME
-    self.cookie_data = ''
-    self.profile_data = {}
-    self.cookie_file = (
+        self.title = APP_NAME
+        self.cookie_data = ''
+        self.profile_data = {}
+        self.cookie_file = (
         Path(self.user_data_dir) / 'cookie_store.json'
     )
 
