@@ -1,35 +1,387 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<meta name="theme-color" content="#fff5f8"><title>bilibilidl</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#fff5f8">
+<title>bilibilidl</title>
 <style>
-:root{--pink:#f45d91;--pink2:#fff0f5;--ink:#26232a;--muted:#8c8790;--line:#f1e5ea;--white:#fff;--green:#27a86b;--shadow:0 8px 28px #e9b7c51c}*{box-sizing:border-box}body{margin:0;background:#fffafd;color:var(--ink);font-family:system-ui,-apple-system,"Noto Sans CJK SC",sans-serif;font-size:14px}button,input{font:inherit}button{border:0;cursor:pointer}.app{max-width:560px;margin:auto;min-height:100vh;padding-bottom:84px;background:linear-gradient(180deg,#fff3f7 0,#fffafd 260px)}header{display:flex;align-items:center;justify-content:space-between;padding:20px 18px 14px}.brand{font-size:23px;font-weight:850;letter-spacing:-.7px}.brand span{color:var(--pink)}.sub{font-size:12px;color:var(--muted);margin-top:3px}.login{border-radius:20px;padding:10px 14px;background:#fff;color:var(--pink);font-weight:700;box-shadow:var(--shadow)}main{padding:4px 15px}.panel{background:#fff;border:1px solid #f8e8ee;border-radius:24px;padding:17px;margin-bottom:13px;box-shadow:var(--shadow)}h2{font-size:16px;margin:0 0 13px}.field{width:100%;border:1px solid var(--line);border-radius:16px;background:#fffafd;padding:15px;outline:none;color:var(--ink)}.field:focus{border-color:#f7a8c4;box-shadow:0 0 0 3px #f45d9114}.primary{width:100%;padding:14px;border-radius:16px;background:var(--pink);color:white;font-weight:800;margin-top:11px;box-shadow:0 7px 16px #f45d9130}.secondary{padding:10px 13px;border-radius:13px;background:var(--pink2);color:#d84278;font-weight:700}.muted{color:var(--muted);font-size:12px}.row{display:flex;align-items:center;gap:10px}.between{justify-content:space-between}.cover{width:92px;height:62px;object-fit:cover;border-radius:12px;background:#f9e8ee}.video-title{font-weight:800;font-size:15px;line-height:1.45}.chip{display:inline-block;background:var(--pink2);color:#d84278;border-radius:10px;padding:5px 8px;font-size:11px;margin-top:5px}.hide{display:none!important}.options{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.part{display:flex;gap:9px;align-items:flex-start;border:1px solid var(--line);padding:11px;border-radius:14px;margin-top:8px}.part input{accent-color:var(--pink);margin-top:3px}.part-name{font-weight:650;line-height:1.4}.part small{color:var(--muted)}select{border:1px solid var(--line);border-radius:12px;padding:10px;background:#fffafd;max-width:60%;color:var(--ink)}.progress{height:8px;background:#f8e9ef;border-radius:8px;overflow:hidden;margin:13px 0 8px}.progress>div{height:100%;width:0;background:linear-gradient(90deg,#f58cb0,#f45d91);transition:width .25s}.file{padding:12px 0;border-bottom:1px solid #f7edf1}.file:last-child{border:0}.file-name{font-weight:650;word-break:break-all}.tabs{position:fixed;bottom:0;left:0;right:0;z-index:5;background:#ffffffed;backdrop-filter:blur(15px);border-top:1px solid var(--line);display:flex;justify-content:center}.tabwrap{width:560px;display:flex;padding:8px 12px calc(8px + env(safe-area-inset-bottom));gap:5px}.tab{flex:1;background:transparent;color:#9c9299;padding:8px 4px;border-radius:13px;font-size:12px}.tab b{display:block;font-size:19px;margin-bottom:2px}.tab.active{background:var(--pink2);color:#d84278;font-weight:800}.notice{background:#fff7df;color:#876326;border-radius:12px;padding:10px;font-size:12px;line-height:1.5}.empty{text-align:center;color:var(--muted);padding:22px 8px}.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.stat{background:#fff7fa;border-radius:15px;padding:14px}.stat strong{display:block;font-size:19px;margin-bottom:3px}.stat span{font-size:12px;color:var(--muted)}.toast{position:fixed;bottom:92px;left:50%;transform:translateX(-50%);background:#29242b;color:#fff;border-radius:13px;padding:11px 15px;max-width:90%;z-index:10;display:none}
-</style></head>
-<body><div class="app">
-<header><div><div class="brand">bili<span>bili</span>dl</div><div class="sub">B站视频解析 · 本地下载</div></div><button class="login" id="accountBtn" onclick="showTab('me')">我的账号　›</button></header>
+:root{--pink:#f45d91;--pale:#fff0f5;--ink:#29252d;--muted:#8d8790;--line:#f1e5eb;--bg:#fffafd;--shadow:0 8px 25px #e9b7c51c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px system-ui,-apple-system,"Noto Sans CJK SC",sans-serif}
+button,input,select{font:inherit}
+button{border:0;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}
+.app{max-width:560px;min-height:100vh;margin:auto;padding-bottom:88px;background:linear-gradient(#fff3f7,#fffafd 280px)}
+header{display:flex;align-items:center;justify-content:space-between;padding:20px 18px 14px}
+.brand{font-size:23px;font-weight:850;letter-spacing:-.7px}
+.brand span{color:var(--pink)}
+.sub,.muted{font-size:12px;color:var(--muted)}
+.sub{margin-top:3px}
+.login,.secondary{padding:10px 13px;border-radius:14px;background:var(--pale);color:#d84278;font-weight:750}
+.login{border-radius:22px;background:white;box-shadow:var(--shadow)}
+main{padding:4px 15px}
+.panel{background:#fff;border:1px solid #f8e8ee;border-radius:23px;padding:16px;margin-bottom:13px;box-shadow:var(--shadow)}
+h2{font-size:16px;margin:0 0 13px}
+.field{width:100%;padding:14px;border:1px solid var(--line);border-radius:15px;background:#fffafd;outline:none}
+.field:focus{border-color:#f7a8c4;box-shadow:0 0 0 3px #f45d9114}
+.primary{width:100%;padding:14px;margin-top:11px;border-radius:15px;background:var(--pink);color:white;font-weight:800;box-shadow:0 7px 16px #f45d9130}
+.row{display:flex;align-items:center;gap:10px}
+.between{justify-content:space-between}
+.cover{width:96px;height:66px;object-fit:cover;border-radius:12px;background:var(--pale)}
+.video-title{font-size:15px;font-weight:800;line-height:1.45;overflow-wrap:anywhere}
+.chip{display:inline-block;margin-top:5px;padding:5px 8px;border-radius:10px;background:var(--pale);color:#d84278;font-size:11px}
+.hide{display:none!important}
+.options{display:flex;gap:7px;flex-wrap:wrap}
+.part{display:flex;align-items:flex-start;gap:10px;padding:12px;margin-top:8px;border:1px solid var(--line);border-radius:14px}
+.part input{accent-color:var(--pink);margin-top:3px}
+.part-name{font-weight:700;line-height:1.4}
+.part small{color:var(--muted)}
+select{max-width:65%;padding:10px;border:1px solid var(--line);border-radius:12px;background:#fffafd;color:var(--ink)}
+.progress{height:8px;margin:12px 0;background:#f8e9ef;border-radius:8px;overflow:hidden}
+.progress div{height:100%;width:0;background:linear-gradient(90deg,#f58cb0,#f45d91);transition:width .25s}
+.file{padding:12px 0;border-bottom:1px solid #f7edf1}
+.file:last-child{border:0}
+.file-name{font-weight:700;overflow-wrap:anywhere}
+.empty{text-align:center;color:var(--muted);padding:22px 8px}
+.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat{padding:14px;border-radius:15px;background:#fff7fa}
+.stat strong{display:block;font-size:19px;margin-bottom:3px}
+.stat span{font-size:12px;color:var(--muted)}
+.notice{padding:10px;border-radius:12px;background:#fff7df;color:#876326;font-size:12px;line-height:1.5}
+.tabs{position:fixed;bottom:0;left:0;right:0;z-index:5;background:#ffffffed;backdrop-filter:blur(15px);border-top:1px solid var(--line)}
+.tabwrap{display:flex;gap:5px;width:min(560px,100%);margin:auto;padding:8px 12px calc(8px + env(safe-area-inset-bottom))}
+.tab{flex:1;padding:8px 4px;border-radius:13px;background:transparent;color:#9c9299;font-size:12px}
+.tab b{display:block;font-size:19px;margin-bottom:2px}
+.tab.active{background:var(--pale);color:#d84278;font-weight:800}
+.toast{position:fixed;bottom:95px;left:50%;transform:translateX(-50%);z-index:10;display:none;max-width:90%;padding:11px 15px;border-radius:13px;background:#29242b;color:white}
+</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <div><div class="brand">bili<span>bili</span>dl</div><div class="sub">B站视频解析 · 本地下载</div></div>
+  <button class="login" id="accountBtn" onclick="showTab('me')">我的账号 ›</button>
+</header>
 <main>
 <section id="homePage">
-<div class="panel"><h2>解析视频</h2><input class="field" id="videoUrl" placeholder="粘贴 BV / AV / 视频链接 / b23.tv" autocomplete="off"><button class="primary" id="parseBtn" onclick="parseVideo()">解析视频</button><div class="muted" style="margin-top:10px">支持单个视频与多 P 视频。登录状态与高画质取决于当前已接通的账号模块。</div></div>
-<div class="panel hide" id="videoPanel"><div class="row" style="align-items:flex-start"><img id="cover" class="cover" alt="视频封面"><div style="flex:1;min-width:0"><div id="videoTitle" class="video-title"></div><div id="videoOwner" class="muted" style="margin-top:5px"></div><span id="videoMeta" class="chip"></span></div></div>
-<div class="row between" style="margin-top:17px"><b>下载清晰度</b><select id="quality"></select></div><div class="row between" style="margin-top:18px"><b>分 P 选择</b><div class="options" style="margin:0"><button class="secondary" onclick="selectAll(true)">全选</button><button class="secondary" onclick="selectAll(false)">清空</button></div></div><div id="parts"></div><button class="primary" onclick="startDownload()">开始下载所选分 P</button><div class="muted" style="margin-top:9px">下载任务由本地 Python 后端执行，离开此页面不会主动取消。</div></div>
-<div class="panel" id="taskPanel"><div class="row between"><h2 style="margin:0">下载任务</h2><button class="secondary" onclick="refreshHistory()">刷新列表</button></div><div id="taskList" class="empty">暂无正在显示的任务</div></div>
+  <div class="panel">
+    <h2>解析视频</h2>
+    <input class="field" id="videoUrl" placeholder="粘贴 BV / AV / 视频链接 / b23.tv" autocomplete="off">
+    <button class="primary" id="parseBtn" onclick="parseVideo()">解析视频</button>
+    <p class="muted">支持单个视频和多 P 视频。下载由应用内的本地后端执行。</p>
+  </div>
+
+  <div class="panel hide" id="videoPanel">
+    <div class="row" style="align-items:flex-start">
+      <img id="cover" class="cover" alt="视频封面">
+      <div style="flex:1;min-width:0">
+        <div id="videoTitle" class="video-title"></div>
+        <div id="videoOwner" class="muted" style="margin-top:5px"></div>
+        <span id="videoMeta" class="chip"></span>
+      </div>
+    </div>
+
+    <div class="row between" style="margin-top:17px">
+      <b>下载清晰度</b><select id="quality"></select>
+    </div>
+
+    <div style="margin-top:18px"><b>分 P 选择方式</b></div>
+    <div class="options" style="margin-top:10px">
+      <button class="secondary" onclick="setPartMode('single')">下载单个分 P</button>
+      <button class="secondary" onclick="setPartMode('all')">下载全部分 P</button>
+    </div>
+    <div class="muted" id="partModeHint" style="margin-top:8px">请选择一个分 P，或选择全部分 P。</div>
+    <div id="parts"></div>
+    <button class="primary" id="downloadBtn" onclick="startDownload()">开始下载</button>
+  </div>
+
+  <div class="panel">
+    <div class="row between">
+      <h2 style="margin:0">下载任务</h2>
+      <button class="secondary" onclick="refreshHistory()">刷新列表</button>
+    </div>
+    <div id="taskList" class="empty">暂无正在显示的任务</div>
+  </div>
 </section>
-<section id="downloadsPage" class="hide"><div class="panel"><div class="row between"><h2 style="margin:0">已下载</h2><button class="secondary" onclick="refreshHistory()">刷新</button></div><div id="historyList" class="empty">正在读取本地文件…</div></div></section>
-<section id="mePage" class="hide"><div class="panel"><div class="row"><div style="width:54px;height:54px;border-radius:50%;display:grid;place-items:center;background:var(--pink2);color:var(--pink);font-size:24px">♥</div><div><div style="font-weight:800;font-size:17px" id="profileName">B站账号</div><div class="muted" id="profileStatus">正在检查登录状态…</div></div></div></div><div class="panel"><h2>本地统计</h2><div class="statgrid"><div class="stat"><strong id="fileCount">—</strong><span>已下载文件</span></div><div class="stat"><strong id="fileSize">—</strong><span>占用空间</span></div></div></div><div class="panel"><h2>应用信息</h2><div class="row between"><span>应用名称</span><b>bilibilidl</b></div><div class="row between" style="margin-top:13px"><span>界面版本</span><b>HTML Preview</b></div><div class="notice" style="margin-top:14px">此页面负责 HTML 主界面。登录、在线预览、封面导出、弹幕和字幕等功能需对应后端接口实际接通；不会把未实现的按钮伪装成已完成。</div></div></section>
-</main></div>
-<nav class="tabs"><div class="tabwrap"><button class="tab active" id="tabHome" onclick="showTab('home')"><b>⌂</b>首页</button><button class="tab" id="tabDownloads" onclick="showTab('downloads')"><b>▤</b>已下载</button><button class="tab" id="tabMe" onclick="showTab('me')"><b>♡</b>我的</button></div></nav><div id="toast" class="toast"></div>
+
+<section id="downloadsPage" class="hide">
+  <div class="panel">
+    <div class="row between">
+      <h2 style="margin:0">已下载</h2>
+      <button class="secondary" onclick="refreshHistory()">刷新</button>
+    </div>
+    <div id="historyList" class="empty">正在读取本地文件…</div>
+  </div>
+</section>
+
+<section id="mePage" class="hide">
+  <div class="panel">
+    <div class="row">
+      <div style="width:54px;height:54px;border-radius:50%;display:grid;place-items:center;background:var(--pale);color:var(--pink);font-size:24px">♥</div>
+      <div><div style="font-weight:800;font-size:17px" id="profileName">B站账号</div><div class="muted" id="profileStatus">正在检查登录状态…</div></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>本地统计</h2>
+    <div class="statgrid">
+      <div class="stat"><strong id="fileCount">—</strong><span>已下载文件</span></div>
+      <div class="stat"><strong id="fileSize">—</strong><span>占用空间</span></div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>应用信息</h2>
+    <div class="row between"><span>应用名称</span><b>bilibilidl</b></div>
+    <div class="row between" style="margin-top:13px"><span>界面</span><b>HTML Preview</b></div>
+    <div class="notice" style="margin-top:14px">登录与下载状态以本地后端返回结果为准。当前页面不会将尚未接通的功能显示为已完成。</div>
+  </div>
+</section>
+</main>
+</div>
+
+<nav class="tabs">
+  <div class="tabwrap">
+    <button class="tab active" id="tabHome" onclick="showTab('home')"><b>⌂</b>首页</button>
+    <button class="tab" id="tabDownloads" onclick="showTab('downloads')"><b>▤</b>已下载</button>
+    <button class="tab" id="tabMe" onclick="showTab('me')"><b>♡</b>我的</button>
+  </div>
+</nav>
+<div id="toast" class="toast"></div>
+
 <script>
-const $=id=>document.getElementById(id);let parsed=null,currentTask=null,pollHandle=null;
-function toast(s){let t=$('toast');t.textContent=s;t.style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.style.display='none',2800)}
-function nativeCall(data){try{if(window.NativeBridge&&typeof NativeBridge.call==='function')return JSON.parse(NativeBridge.call(JSON.stringify(data)));}catch(e){return {ok:false,error:'桥接调用失败：'+e.message}}return {ok:false,error:'当前为浏览器预览模式；请在集成 WebView 的 APK 中使用。'}}
-function showTab(tab){['home','downloads','me'].forEach(n=>{ $(n+'Page').classList.toggle('hide',n!==tab);$('tab'+n[0].toUpperCase()+n.slice(1)).classList.toggle('active',n===tab)});if(tab==='downloads')refreshHistory();if(tab==='me')refreshAccount()}
-function parseVideo(){const input=$('videoUrl').value.trim();if(!input)return toast('请先粘贴 B 站视频链接');$('parseBtn').disabled=true;$('parseBtn').textContent='解析中…';setTimeout(()=>{const r=nativeCall({action:'parse',url:input});$('parseBtn').disabled=false;$('parseBtn').textContent='解析视频';if(!r.ok)return toast(r.error||'解析失败');parsed=r;$('videoPanel').classList.remove('hide');$('videoTitle').textContent=r.video.title||'未命名视频';$('videoOwner').textContent='UP主：'+(r.video.owner||'未知');$('videoMeta').textContent=(r.pages||[]).length+' 个分P';$('cover').src=r.video.pic||'';const q=$('quality');q.innerHTML='';(r.qualities||[]).forEach((v,i)=>{let o=document.createElement('option');o.value=v.qn;o.textContent=v.label+' ('+v.qn+')';q.appendChild(o)});if(!q.options.length){let o=document.createElement('option');o.value=0;o.textContent='默认清晰度';q.appendChild(o)}const parts=$('parts');parts.innerHTML='';(r.pages||[]).forEach(p=>{const lab=document.createElement('label');lab.className='part';lab.innerHTML=`<input type="checkbox" checked value="${Number(p.page)||1}"><span><span class="part-name">P${Number(p.page)||1}　${esc(p.part||'未命名分P')}</span><br><small>${duration(p.duration)}</small></span>`;parts.appendChild(lab)});toast('解析成功');},0)}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function duration(n){n=Number(n)||0;return Math.floor(n/60)+':'+String(Math.floor(n%60)).padStart(2,'0')}
-function selectAll(v){document.querySelectorAll('#parts input[type=checkbox]').forEach(x=>x.checked=v)}
-function startDownload(){if(!parsed)return toast('请先解析视频');const pages=[...document.querySelectorAll('#parts input:checked')].map(x=>Number(x.value));if(!pages.length)return toast('至少选择一个分P');const selected=pages.length===(parsed.pages||[]).length?'all':pages.length===1?pages[0]:'all';if(pages.length>1&&selected==='all'&&pages.length!==(parsed.pages||[]).length)return toast('当前后端仅支持全选或单个分P，请分批下载');const r=nativeCall({action:'start_download',pages:selected,quality:Number($('quality').value)||0});if(!r.ok)return toast(r.error||'无法启动下载');currentTask=r.task_id;$('taskList').innerHTML='下载任务已启动：'+esc(currentTask);toast('下载任务已启动');pollTask()}
-function pollTask(){if(pollHandle)clearTimeout(pollHandle);if(!currentTask)return;const r=nativeCall({action:'task_status',task_id:currentTask});if(r.ok&&r.task){const t=r.task;$('taskList').innerHTML=`<div class="row between"><b>${esc(t.message||t.state)}</b><b>${Number(t.progress)||0}%</b></div><div class="progress"><div style="width:${Math.max(0,Math.min(100,Number(t.progress)||0))}%"></div></div><div class="muted">${esc(t.state||'')}</div>${t.error?'<div class="notice">'+esc(t.error)+'</div>':''}${t.state==='running'?'<button class="secondary" onclick="cancelTask()">取消下载</button>':''}`;if(t.state!=='running'){currentTask=null;refreshHistory();return}}pollHandle=setTimeout(pollTask,1200)}function cancelTask(){if(!currentTask)return;const r=nativeCall({action:'cancel_download',task_id:currentTask});toast(r.ok?'已请求取消':'取消失败：'+(r.error||''))}
-function refreshHistory(){const r=nativeCall({action:'history'});if(!r.ok){$('historyList').innerHTML='<div class="empty">'+esc(r.error||'无法读取本地下载记录')+'</div>';return}const files=r.files||[];$('historyList').innerHTML=files.length?files.map(f=>`<div class="file"><div class="file-name">${esc(f.name)}</div><div class="muted">${bytes(f.size)} · ${esc(f.path||'')}</div></div>`).join(''):'<div class="empty">还没有下载文件</div>';$('fileCount').textContent=files.length;$('fileSize').textContent=bytes(files.reduce((a,f)=>a+(Number(f.size)||0),0));}
-function refreshAccount(){const r=nativeCall({action:'account'});if(!r.ok){$('profileStatus').textContent='无法读取账号状态';return}$('profileName').textContent=r.logged_in?(r.profile?.uname||'已登录账号'):'B站账号';$('profileStatus').textContent=r.logged_in?'已登录 · UID '+(r.profile?.mid||'未知'):'当前未登录';$('accountBtn').textContent=r.logged_in?(r.profile?.uname||'已登录'):'我的账号　›'}function bytes(n){n=Number(n)||0;if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';if(n<1073741824)return(n/1048576).toFixed(1)+' MB';return(n/1073741824).toFixed(2)+' GB'}
-window.addEventListener('load',()=>{const r=nativeCall({action:'ping'});if(!r.ok)toast('预览模式：需要在 APK 内才能调用下载后端');refreshAccount();refreshHistory()});
-</script></body></html>
+const $ = id => document.getElementById(id);
+let parsed = null;
+let currentTask = null;
+let pollHandle = null;
+let partMode = 'single';
+
+function toast(message) {
+  const el = $('toast');
+  el.textContent = message;
+  el.style.display = 'block';
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.style.display = 'none', 2800);
+}
+
+function nativeCall(data) {
+  try {
+    if (window.NativeBridge && typeof window.NativeBridge.call === 'function') {
+      const result = JSON.parse(window.NativeBridge.call(JSON.stringify(data)));
+      if (result && typeof result === 'object') return result;
+      return {ok:false,error:'本地接口返回的数据格式不正确'};
+    }
+  } catch (error) {
+    return {ok:false,error:'桥接调用失败：' + error.message};
+  }
+  return {ok:false,error:'当前是浏览器预览模式，请在集成了本地桥接的 APK 中使用。'};
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function duration(value) {
+  const n = Math.max(0, Number(value) || 0);
+  return Math.floor(n / 60) + ':' + String(Math.floor(n % 60)).padStart(2,'0');
+}
+
+function showTab(tab) {
+  ['home','downloads','me'].forEach(name => {
+    $(name + 'Page').classList.toggle('hide', name !== tab);
+    $('tab' + name[0].toUpperCase() + name.slice(1)).classList.toggle('active', name === tab);
+  });
+  if (tab === 'downloads') refreshHistory();
+  if (tab === 'me') refreshAccount();
+}
+
+function setPartMode(mode) {
+  partMode = mode;
+  $('partModeHint').textContent = mode === 'all'
+    ? '将提交全部分 P 下载请求。'
+    : '请选择一个分 P；当前后端支持单个分 P 或全部分 P。';
+  document.querySelectorAll('#parts input[type=radio]').forEach(input => {
+    input.checked = mode === 'single' && input.value === String(input.dataset.page);
+  });
+}
+
+function parseVideo() {
+  const input = $('videoUrl').value.trim();
+  if (!input) return toast('请先粘贴 B 站视频链接');
+
+  $('parseBtn').disabled = true;
+  $('parseBtn').textContent = '解析中…';
+
+  const result = nativeCall({action:'parse',url:input});
+  $('parseBtn').disabled = false;
+  $('parseBtn').textContent = '解析视频';
+
+  if (!result.ok) return toast(result.error || '解析失败');
+  if (!result.video || !Array.isArray(result.pages)) return toast('解析结果缺少视频或分 P 数据');
+
+  parsed = result;
+  partMode = 'single';
+  $('videoPanel').classList.remove('hide');
+  $('videoTitle').textContent = result.video.title || '未命名视频';
+
+  const owner = result.video.owner;
+  $('videoOwner').textContent = 'UP主：' +
+    (owner && typeof owner === 'object' ? (owner.name || '未知') : (owner || '未知'));
+  $('videoMeta').textContent = result.pages.length + ' 个分 P';
+
+  $('cover').onerror = () => { $('cover').removeAttribute('src'); };
+  $('cover').src = result.video.pic || '';
+
+  const quality = $('quality');
+  quality.replaceChildren();
+  (result.qualities || []).forEach(item => {
+    const option = document.createElement('option');
+    option.value = item.qn;
+    option.textContent = (item.label || ('画质 ' + item.qn)) + ' (' + item.qn + ')';
+    quality.appendChild(option);
+  });
+  if (!quality.options.length) {
+    const option = document.createElement('option');
+    option.value = '0';
+    option.textContent = '接口默认画质';
+    quality.appendChild(option);
+  }
+
+  const parts = $('parts');
+  parts.replaceChildren();
+  result.pages.forEach((page,index) => {
+    const number = Number(page.page) || index + 1;
+    const label = document.createElement('label');
+    label.className = 'part';
+    label.innerHTML =
+      '<input type="radio" name="selectedPart" data-page="' + number +
+      '" value="' + number + '"' + (index === 0 ? ' checked' : '') + '>' +
+      '<span><span class="part-name">P' + number + '　' +
+      esc(page.part || '未命名分 P') +
+      '</span><br><small>' + duration(page.duration) + '</small></span>';
+    parts.appendChild(label);
+  });
+
+  $('partModeHint').textContent = '请选择一个分 P，或选择全部分 P。';
+  toast('解析成功');
+}
+
+function startDownload() {
+  if (!parsed) return toast('请先解析视频');
+
+  let selected;
+  if (partMode === 'all') {
+    selected = 'all';
+  } else {
+    const checked = document.querySelector('#parts input[type=radio]:checked');
+    if (!checked) return toast('请先选择一个分 P');
+    selected = Number(checked.value);
+  }
+
+  $('downloadBtn').disabled = true;
+  const result = nativeCall({
+    action:'start_download',
+    pages:selected,
+    quality:Number($('quality').value) || 0
+  });
+  $('downloadBtn').disabled = false;
+
+  if (!result.ok) return toast(result.error || '无法启动下载');
+  if (!result.task_id) return toast('后端未返回下载任务编号');
+
+  currentTask = String(result.task_id);
+  $('taskList').textContent = '任务已提交，正在读取真实下载状态…';
+  toast('下载任务已启动');
+  pollTask();
+}
+
+function pollTask() {
+  clearTimeout(pollHandle);
+  if (!currentTask) return;
+
+  const result = nativeCall({action:'task_status',task_id:currentTask});
+  if (!result.ok || !result.task) {
+    $('taskList').textContent = result.error || '暂时无法读取任务状态';
+    pollHandle = setTimeout(pollTask, 1800);
+    return;
+  }
+
+  const task = result.task;
+  const state = String(task.state || 'unknown');
+  const progress = Math.max(0, Math.min(100, Number(task.progress) || 0));
+  const files = Array.isArray(task.files) ? task.files : [];
+
+  $('taskList').innerHTML =
+    '<div class="row between"><b>' + esc(task.message || state) +
+    '</b><b>' + progress + '%</b></div>' +
+    '<div class="progress"><div style="width:' + progress + '%"></div></div>' +
+    '<div class="muted">状态：' + esc(state) + '</div>' +
+    (task.error ? '<div class="notice" style="margin-top:8px">' + esc(task.error) + '</div>' : '') +
+    (files.length ? '<div class="muted" style="margin-top:8px">后端返回文件：' +
+      files.map(esc).join('<br>') + '</div>' : '');
+
+  if (state === 'running') {
+    pollHandle = setTimeout(pollTask, 1200);
+  } else {
+    currentTask = null;
+    refreshHistory();
+    if (state === 'completed') toast('后端报告任务结束，请确认文件列表中的实际文件');
+    else if (state === 'failed') toast('下载失败，请查看任务错误信息');
+    else if (state === 'cancelled') toast('下载任务已取消');
+  }
+}
+
+function refreshHistory() {
+  const result = nativeCall({action:'history'});
+  if (!result.ok) {
+    $('historyList').innerHTML = '<div class="empty">' + esc(result.error || '无法读取本地下载记录') + '</div>';
+    return;
+  }
+
+  const files = Array.isArray(result.files) ? result.files : [];
+  $('historyList').innerHTML = files.length
+    ? files.map(file =>
+        '<div class="file"><div class="file-name">' + esc(file.name) +
+        '</div><div class="muted">' + bytes(file.size) + ' · ' +
+        esc(file.path || '') + '</div></div>'
+      ).join('')
+    : '<div class="empty">还没有下载文件</div>';
+
+  $('fileCount').textContent = files.length;
+  $('fileSize').textContent = bytes(files.reduce((sum,file) => sum + (Number(file.size) || 0),0));
+}
+
+function refreshAccount() {
+  const result = nativeCall({action:'account'});
+  if (!result.ok) {
+    $('profileStatus').textContent = '无法读取账号状态';
+    return;
+  }
+
+  const profile = result.profile && typeof result.profile === 'object' ? result.profile : {};
+  const loggedIn = Boolean(result.logged_in);
+  $('profileName').textContent = loggedIn ? (profile.uname || '已登录账号') : 'B站账号';
+  $('profileStatus').textContent = loggedIn
+    ? '已登录 · UID ' + (profile.mid || profile.uid || '未知')
+    : '当前未登录';
+  $('accountBtn').textContent = loggedIn ? (profile.uname || '已登录') : '我的账号 ›';
+}
+
+function bytes(value) {
+  let n = Math.max(0, Number(value) || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+window.addEventListener('load', () => {
+  const result = nativeCall({action:'ping'});
+  if (!result.ok) toast('浏览器预览模式：下载功能需要 APK 本地后端');
+  refreshAccount();
+  refreshHistory();
+});
+</script>
+</body>
+</html>
