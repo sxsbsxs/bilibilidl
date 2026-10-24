@@ -27,6 +27,7 @@ android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.enable_androidx = True
 android.add_src = src
+android.extra_manifest_application_arguments = android:usesCleartextTraffic="true"
 
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,WRITE_EXTERNAL_STORAGE
 android.debuggable = True
