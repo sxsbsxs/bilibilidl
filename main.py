@@ -725,7 +725,7 @@ class HomeScreen(Screen):
         threading.Thread(
             target=worker, daemon=True, name='bili-parse'
         ).start()
-        @mainthread
+    @mainthread
     def _set_cover_preview(self, raw):
         try:
             from PIL import Image as PILImage
