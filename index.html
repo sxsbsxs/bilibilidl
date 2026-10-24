@@ -271,27 +271,43 @@ function startDownload() {
   if (!parsed) return toast('请先解析视频');
 
   let selected;
+
   if (partMode === 'all') {
     selected = 'all';
   } else {
-    const checked = document.querySelector('#parts input[type=radio]:checked');
-    if (!checked) return toast('请先选择一个分 P');
+    const checked = document.querySelector(
+      '#parts input[type=radio]:checked'
+    );
+
+    if (!checked) {
+      return toast('请先选择一个分 P');
+    }
+
     selected = Number(checked.value);
   }
 
   $('downloadBtn').disabled = true;
+
   const result = nativeCall({
-    action:'start_download',
-    pages:selected,
-    quality:Number($('quality').value) || 0
+    action: 'start_download',
+    pages: selected,
+    quality: Number($('quality').value) || 0,
+    mode: 'video'
   });
+
   $('downloadBtn').disabled = false;
 
-  if (!result.ok) return toast(result.error || '无法启动下载');
-  if (!result.task_id) return toast('后端未返回下载任务编号');
+  if (!result.ok) {
+    return toast(result.error || '无法启动下载');
+  }
+
+  if (!result.task_id) {
+    return toast('后端未返回下载任务编号');
+  }
 
   currentTask = String(result.task_id);
   $('taskList').textContent = '任务已提交，正在读取真实下载状态…';
+
   toast('下载任务已启动');
   pollTask();
 }
