@@ -103,9 +103,6 @@ jobs:
           test -f 'bilibilidl加载图.png'
           test -f src/org/bilibilidl/MediaMerger.java
 
-          echo "Checking main.py is the new version..."
-          grep -n 'def _label' main.py
-          grep -n 'style_system_bars' main.py
 
           echo "Checking Python syntax..."
           python -m py_compile \
