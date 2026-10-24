@@ -1788,57 +1788,39 @@ class _BridgeServer:
 
 class BiliDlApp(App):
     def build(self):
-        self.title = APP_NAME
-        self.cookie_data = ''
-        self.profile_data = {}
-        self.cookie_file = (
-        Path(self.user_data_dir) / 'cookie_store.json'
-    )
+        # 前面的初始化代码……
 
-    self.sm = ScreenManager()
-    self.home = HomeScreen(self, name='home')
-    self.sm.add_widget(self.home)
+        if platform == 'android':
+            try:
+                preload_merger()
+            except Exception:
+                pass
 
-    self.load_cookie_local()
+            html_file = BASE_DIR / 'index.html'
+            splash_file = BASE_DIR / 'bilibilidl加载图.png'
 
-    self._bridge_last_info = None
-    self._bridge_last_pages = []
-    self._bridge_last_qualities = []
+            if html_file.is_file() and splash_file.is_file():
+                self._startup_view = FloatLayout()
+                self._startup_image = Image(
+                    source=str(splash_file),
+                    allow_stretch=True,
+                    keep_ratio=False,
+                    size_hint=(1, 1),
+                    pos_hint={'x': 0, 'y': 0}
+                )
+                self._startup_view.add_widget(
+                    self._startup_image
+                )
 
-    self._bridge_server = _BridgeServer(self)
-    self._bridge_server.start()
+                Clock.schedule_once(
+                    lambda _dt: self.open_html_frontend(html_file),
+                    0.25
+                )
+                return self._startup_view
 
-    if platform == 'android':
-        try:
-            preload_merger()
-        except Exception:
-            pass
-
-        html_file = BASE_DIR / 'index.html'
-        splash_file = BASE_DIR / 'bilibilidl加载图.png'
-
-        if html_file.is_file() and splash_file.is_file():
-            self._startup_view = FloatLayout()
-            self._startup_image = Image(
-                source=str(splash_file),
-                allow_stretch=True,
-                keep_ratio=False,
-                size_hint=(1, 1),
-                pos_hint={'x': 0, 'y': 0}
-            )
-            self._startup_view.add_widget(
-                self._startup_image
-            )
-
-            Clock.schedule_once(
-                lambda _dt: self.open_html_frontend(html_file),
-                0.25
-            )
-            return self._startup_view
+            return self.sm
 
         return self.sm
-
-    return self.sm
 
 def open_html_frontend(self, html_file):
     try:
