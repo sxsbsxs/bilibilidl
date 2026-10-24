@@ -386,9 +386,21 @@ class LoginPopup(Popup):
             '可生成二维码后使用 B 站 App 扫码登录',
             13, GRAY, 44, halign='center'
         )
-        self.qr_image = Image(size_hint_y=None, height=dp(220))
+        qr_shell = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(280), padding=dp(8))
+        with qr_shell.canvas.before:
+            Color(1, 1, 1, 1)
+            qr_shell._qr_bg = RoundedRectangle(pos=qr_shell.pos, size=qr_shell.size, radius=[dp(14)])
+        qr_shell.bind(pos=lambda obj, *_: setattr(obj._qr_bg, 'pos', obj.pos), size=lambda obj, *_: setattr(obj._qr_bg, 'size', obj.size))
+        self.qr_image = Image(size_hint=(1, 1), allow_stretch=True, keep_ratio=True)
+        qr_shell.add_widget(self.qr_image)
+        direct = PinkButton(
+            text='打开 B 站登录（优先 App）',
+            size_hint_y=None,
+            height=dp(48)
+        )
+        direct.bind(on_release=self.open_bili_login)
         make = PinkButton(
-            text='生成登录二维码',
+            text='使用扫码登录',
             size_hint_y=None,
             height=dp(48)
         )
@@ -401,11 +413,69 @@ class LoginPopup(Popup):
         )
         close.bind(on_release=lambda *_: self.dismiss())
         root.add_widget(self.status)
-        root.add_widget(self.qr_image)
+        instruction = ui_label('直接登录：先尝试打开 B 站 App；若无法打开则转到浏览器。\n扫码登录：点击下方按钮生成二维码，再用 B 站 App 扫码并确认。', 12, INK, 58, halign='center')
+        root.add_widget(instruction)
+        root.add_widget(direct)
+        root.add_widget(qr_shell)
         root.add_widget(make)
         root.add_widget(close)
         self.content = root
         self.bind(on_dismiss=lambda *_: self.stop_event.set())
+
+    def open_bili_login(self, *_):
+        """优先启动已安装的 B 站 App；启动失败时打开官方网页登录页。
+
+        App 内登录本身不会自动把 App 私有 Cookie 授权给本应用；
+        因此扫码登录仍保留为本下载器可验证并保存 Cookie 的授权方式。
+        """
+        self.status.text = '正在尝试打开 B 站 App…'
+        def launch():
+            opened_app = False
+            error_text = ''
+            if platform == 'android':
+                try:
+                    from jnius import autoclass
+                    PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                    Intent = autoclass('android.content.Intent')
+                    activity = PythonActivity.mActivity
+                    package_manager = activity.getPackageManager()
+                    intent = package_manager.getLaunchIntentForPackage('tv.danmaku.bili')
+                    if intent is not None:
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        activity.startActivity(intent)
+                        opened_app = True
+                except Exception as exc:
+                    error_text = safe_text(exc, 100)
+            if opened_app:
+                @mainthread
+                def app_opened():
+                    self.status.text = '已打开 B 站 App。登录后返回本应用；如需授权下载器，请使用扫码登录。'
+                app_opened()
+                return
+            try:
+                if platform == 'android':
+                    from jnius import autoclass
+                    PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                    Intent = autoclass('android.content.Intent')
+                    Uri = autoclass('android.net.Uri')
+                    activity = PythonActivity.mActivity
+                    intent = Intent(Intent.ACTION_VIEW, Uri.parse('https://passport.bilibili.com/login'))
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(intent)
+                else:
+                    import webbrowser
+                    webbrowser.open('https://passport.bilibili.com/login')
+                @mainthread
+                def browser_opened():
+                    self.status.text = '已打开浏览器登录页。登录后返回本应用；下载器授权仍可使用扫码登录完成。'
+                browser_opened()
+            except Exception as exc:
+                msg = safe_text(exc, 100) or error_text
+                @mainthread
+                def launch_failed():
+                    self.status.text = '无法打开登录页，请检查浏览器或网络：' + msg
+                launch_failed()
+        threading.Thread(target=launch, daemon=True, name='bili-open-login').start()
 
     def generate(self, *_):
         self.stop_event.set()
@@ -417,7 +487,7 @@ class LoginPopup(Popup):
             try:
                 session = new_session()
                 url, key = qr_generate(session)
-                qr = qrcode.QRCode(box_size=6, border=2)
+                qr = qrcode.QRCode(box_size=10, border=4, error_correction=qrcode.constants.ERROR_CORRECT_M)
                 qr.add_data(url)
                 qr.make(fit=True)
                 image = qr.make_image(
@@ -520,6 +590,38 @@ def apply_screen_background(screen, color=BG):
     screen.bind(pos=sync, size=sync)
 
 
+def _open_path_with_android(path, is_directory=False):
+    """Ask Android to open a file or its containing directory; return False if unavailable."""
+    target = Path(str(path)).expanduser()
+    if platform != 'android':
+        return False
+    try:
+        from jnius import autoclass
+        Intent = autoclass('android.content.Intent')
+        Uri = autoclass('android.net.Uri')
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        intent = Intent(Intent.ACTION_VIEW)
+        uri = Uri.parse('file://' + urllib.parse.quote(str(target.resolve()), safe='/:'))
+        intent.setDataAndType(uri, 'resource/folder' if is_directory else _mime_for_file(target))
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        PythonActivity.mActivity.startActivity(intent)
+        return True
+    except Exception:
+        return False
+
+
+def _mime_for_file(path):
+    ext = Path(str(path)).suffix.lower()
+    return {
+        '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.webm': 'video/webm',
+        '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+        '.gif': 'image/gif', '.xml': 'application/xml', '.srt': 'text/plain',
+        '.ass': 'text/plain', '.txt': 'text/plain'
+    }.get(ext, '*/*')
+
+
 class DownloadedScreen(Screen):
     def __init__(self, app, **kwargs):
         super().__init__(**kwargs)
@@ -530,7 +632,7 @@ class DownloadedScreen(Screen):
         root = BoxLayout(orientation='vertical', padding=[dp(17), dp(16), dp(17), dp(10)], spacing=dp(12))
         root.add_widget(ui_label('已下载', 25, INK, 38, bold=True))
         root.add_widget(ui_label('保存在本机的文件 · 不会因返回页面而清除', 12, GRAY, 25))
-        refresh = PinkButton(text='刷新文件列表  ↻', bg=PALE, fg=PINK, size_hint_y=None, height=dp(44))
+        refresh = PinkButton(text='刷新文件列表  ↻', bg=PALE, fg=PINK, size_hint_x=1, size_hint_y=None, height=dp(44))
         refresh.bind(on_release=lambda *_: self.refresh_files())
         root.add_widget(refresh)
         sc = ScrollView(do_scroll_x=False, bar_width=dp(3))
@@ -542,14 +644,12 @@ class DownloadedScreen(Screen):
         self.files_box.clear_widgets()
         folder = Path(self.app_ref.user_data_dir) / 'downloads'
         try:
-            # 忽略下载器尚未完成写入的临时文件，并限制扫描范围，降低大目录卡顿。
             ignored_suffixes = ('.tmp', '.part', '.partial', '.download', '.crdownload')
             candidates = []
             if folder.exists():
                 for item in folder.iterdir():
                     try:
-                        if (not item.is_file()
-                                or item.name.startswith('.')
+                        if (not item.is_file() or item.name.startswith('.')
                                 or item.name.lower().endswith(ignored_suffixes)):
                             continue
                         stat = item.stat()
@@ -561,25 +661,66 @@ class DownloadedScreen(Screen):
             files = [(item, size, mtime) for mtime, item, size in candidates[:500]]
         except Exception:
             files = []
+
         if not files:
-            empty = Card(bg=WHITE, radius=dp(22), padding=[dp(18), dp(22), dp(18), dp(22)], spacing=dp(8), size_hint_y=None)
-            empty.add_widget(ui_label('♫', 34, PINK, 48, halign='center', bold=True))
-            empty.add_widget(ui_label('这里还空空的', 18, INK, 32, halign='center', bold=True))
-            empty.add_widget(ui_label('解析并下载一个视频后，文件会出现在这里。', 12, GRAY, 44, halign='center'))
+            empty = Card(bg=WHITE, radius=dp(22), padding=[dp(18), dp(22), dp(18), dp(22)], spacing=dp(8), size_hint_y=None, height=dp(150))
+            empty.add_widget(ui_label('这里还空空的', 18, INK, 32, halign='center'))
+            empty.add_widget(ui_label('解析并下载后，文件会显示在这里。', 12, GRAY, 44, halign='center'))
             self.files_box.add_widget(empty)
             return
+
         for f, size, mtime in files:
-            try:
-                size_text = ('%.1f MB' % (size/1048576)) if size >= 1048576 else ('%.0f KB' % (size/1024))
-            except Exception:
-                size_text='大小未知'
-            card=Card(bg=WHITE, radius=dp(17), padding=[dp(13), dp(10), dp(13), dp(10)], spacing=dp(4), size_hint_y=None)
-            card.add_widget(ui_label(f.name, 13, INK, 42, bold=True))
-            card.add_widget(ui_label(size_text + '  ·  ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime)), 11, GRAY, 22))
-            btn=PinkButton(text='查看保存路径', bg=PALE, fg=PINK, size_hint_y=None, height=dp(38))
-            btn.bind(on_release=lambda _b, path=str(f): Popup(title='文件位置', content=ui_label(path, 12, INK, 80), size_hint=(.9,.32)).open())
-            card.add_widget(btn)
+            size_text = ('%.1f MB' % (size / 1048576)) if size >= 1048576 else ('%.0f KB' % (size / 1024))
+            # Keep every card a fixed, generous height and use a horizontal layout to prevent overlap.
+            card = Card(bg=WHITE, radius=dp(17), padding=[dp(12), dp(11), dp(12), dp(11)], spacing=dp(10),
+                        orientation='horizontal', size_hint_y=None, height=dp(132))
+            thumb = Image(size_hint=(None, 1), width=dp(104), allow_stretch=True, keep_ratio=True)
+            # Cover downloads are stored beside media; try common matching names/extensions.
+            stem = f.stem
+            cover_candidates = [
+                f.with_name(stem + '_cover' + ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.gif')
+            ]
+            cover_candidates += [
+                f.with_name(stem + ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.gif')
+            ]
+            cover_path = next((candidate for candidate in cover_candidates if candidate.is_file() and candidate != f), None)
+            if cover_path:
+                thumb.source = str(cover_path)
+            else:
+                # Try to find a cover with the same video-id prefix (common downloader naming).
+                prefix = stem.split('_P', 1)[0].split('_p', 1)[0]
+                try:
+                    cover_path = next((x for x in folder.iterdir() if x.is_file() and x != f
+                                       and x.suffix.lower() in ('.jpg', '.jpeg', '.png', '.webp', '.gif')
+                                       and x.stem.startswith(prefix) and 'cover' in x.stem.lower()), None)
+                    if cover_path:
+                        thumb.source = str(cover_path)
+                except Exception:
+                    pass
+            thumb.bind(on_touch_down=lambda widget, touch: _open_path_with_android(f) if widget.collide_point(*touch.pos) else None)
+            card.add_widget(thumb)
+
+            info = BoxLayout(orientation='vertical', spacing=dp(3), size_hint_x=1)
+            info.add_widget(ui_label(f.name, 12, INK, 38, bold=True))
+            info.add_widget(ui_label(size_text + '  ·  ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(mtime)), 10, GRAY, 20))
+            actions = BoxLayout(orientation='horizontal', spacing=dp(7), size_hint_y=None, height=dp(36))
+            folder_btn = PinkButton(text='打开目录', bg=PALE, fg=PINK, size_hint_x=1, size_hint_y=None, height=dp(36), font_size=dp(12))
+            folder_btn.bind(on_release=lambda _b, path=str(f.parent): self._open_location(path, True))
+            file_btn = PinkButton(text='查看文件', bg=PINK, fg=WHITE, size_hint_x=1, size_hint_y=None, height=dp(36), font_size=dp(12))
+            file_btn.bind(on_release=lambda _b, path=str(f): self._open_location(path, False))
+            actions.add_widget(folder_btn)
+            actions.add_widget(file_btn)
+            info.add_widget(actions)
+            card.add_widget(info)
             self.files_box.add_widget(card)
+
+    def _open_location(self, path, is_directory=False):
+        if not _open_path_with_android(path, is_directory=is_directory):
+            # No dark path popup: report the action failure using the app's normal toast.
+            try:
+                self.app_ref.show_toast('无法打开目录，请检查文件管理器或文件访问权限。' if is_directory else '无法打开文件，请检查文件类型或文件访问权限。')
+            except Exception:
+                pass
 
 
 class ProfileScreen(Screen):
@@ -615,16 +756,16 @@ class ProfileScreen(Screen):
         except Exception:
             files=[]; total=0
         size=('%.2f GB'%(total/1073741824)) if total>=1073741824 else ('%.1f MB'%(total/1048576))
-        stats=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(15),dp(15),dp(15)],spacing=dp(8),size_hint_y=None,height=dp(150))
+        stats=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(15),dp(15),dp(15)],spacing=dp(8),size_hint_y=None)
         stats.add_widget(ui_label('本地下载统计',16,INK,28,bold=True))
-        row=BoxLayout(size_hint_y=None,height=dp(76),spacing=dp(8))
+        row=BoxLayout(size_hint_y=None,height=dp(82),spacing=dp(8))
         for value,label in [(str(len(files)),'文件数量'),(size,'占用空间')]:
             tile=Card(bg=PALE,radius=dp(15),padding=[dp(8),dp(7),dp(8),dp(7)],spacing=dp(2),size_hint_y=1)
             tile.add_widget(ui_label(value,17,PINK,28,bold=True,halign='center'))
             tile.add_widget(ui_label(label,11,GRAY,22,halign='center'))
             row.add_widget(tile)
-        stats.add_widget(row); self.body.add_widget(stats)
-        settings=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(14),dp(15),dp(14)],spacing=dp(7),size_hint_y=None,height=dp(190))
+        stats.add_widget(row); stats.height = dp(160); self.body.add_widget(stats)
+        settings=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(14),dp(15),dp(14)],spacing=dp(7),size_hint_y=None,height=dp(205))
         settings.add_widget(ui_label('应用信息',16,INK,28,bold=True))
         settings.add_widget(ui_label('bilibilidl · 本地下载工具',13,GRAY,24))
         settings.add_widget(ui_label('文件默认保存在应用本地目录；导出文件位于 Download/bilibilidl。',12,GRAY,45))
@@ -807,6 +948,8 @@ class HomeScreen(Screen):
         generation = self._parse_generation
         self.parse_btn.disabled = True
         self.result_label.text = '正在解析视频…'
+        self.cover_preview.texture = None
+        self.task_cover.texture = None
 
         def worker():
             try:
@@ -892,13 +1035,26 @@ class HomeScreen(Screen):
                         + (' (%s)' % qlist[0][0] if qlist[0][0] else '')
                     )
                     self.cover_preview.source = ''
+                    self.task_cover.source = ''
                     if cover:
                         try:
                             self._set_cover_preview(cover)
-                            self.task_cover.texture = CoreImage(io.BytesIO(cover)).texture
+                            texture = CoreImage(io.BytesIO(cover)).texture
+                            self.task_cover.texture = texture
                         except Exception:
-                            self.cover_preview.source = ''
-                            self.task_cover.source = cover_url
+                            self.cover_preview.texture = None
+                            self.task_cover.texture = None
+                    elif cover_url:
+                        # B站封面 CDN 偶尔拒绝默认请求头；尝试常见图片格式并统一显示。
+                        try:
+                            r = requests.get(cover_url, timeout=(8, 15), headers={'Referer': 'https://www.bilibili.com/', 'User-Agent': 'Mozilla/5.0'})
+                            r.raise_for_status()
+                            if r.content and len(r.content) <= 20 * 1024 * 1024:
+                                self.cover_bytes = r.content
+                                self._set_cover_preview(r.content)
+                                self.task_cover.texture = CoreImage(io.BytesIO(r.content)).texture
+                        except Exception:
+                            self.result_label.text = '解析成功，但封面暂时加载失败；可继续下载。'
                     self.result_label.text = (
                         '解析成功：%d 个分P。可选择单P或全部分P。'
                         % len(pages)
@@ -1916,6 +2072,8 @@ class BiliDlApp(App):
         for key, btn in getattr(self, 'nav_buttons', {}).items():
             btn.bg = PINK if key == active else WHITE
             btn.fg = WHITE if key == active else GRAY
+            btn.bold = True
+            btn.font_size = dp(15 if key == active else 14)
 
     def get_cookie(self):
         return self.cookie_data or ''
