@@ -11,6 +11,7 @@ import time
 import threading
 import traceback
 import urllib.parse
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import requests
@@ -32,7 +33,7 @@ from kivy.uix.popup import Popup
 from kivy.properties import NumericProperty
 from kivy.uix.image import Image, AsyncImage
 from kivy.uix.widget import Widget
-from kivy.graphics import Color, RoundedRectangle, Ellipse, Line
+from kivy.graphics import Color, RoundedRectangle, Ellipse, Line, Rectangle
 from kivy.config import Config
 
 # Force a light application theme: prevent Kivy/native controls inheriting dark defaults.
@@ -361,6 +362,44 @@ class ChoicePopup(Popup):
             self.dismiss()
 
 
+class QRMatrixWidget(Widget):
+    """Render QR modules directly with Kivy canvas; does not require Pillow."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.matrix = None
+        self._rects = []
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def set_matrix(self, matrix):
+        self.matrix = [list(row) for row in matrix]
+        self._redraw()
+
+    def _redraw(self, *_):
+        self.canvas.clear()
+        self._rects = []
+        if not self.matrix:
+            return
+        rows = len(self.matrix)
+        cols = max((len(row) for row in self.matrix), default=0)
+        if not rows or not cols:
+            return
+        side = min(self.width, self.height)
+        cell = side / max(rows, cols)
+        ox = self.x + (self.width - cell * cols) / 2
+        oy = self.y + (self.height - cell * rows) / 2
+        with self.canvas:
+            Color(1, 1, 1, 1)
+            Rectangle(pos=self.pos, size=self.size)
+            Color(0, 0, 0, 1)
+            for r, row in enumerate(self.matrix):
+                for c, dark in enumerate(row):
+                    if dark:
+                        self._rects.append(Rectangle(
+                            pos=(ox + c * cell, oy + (rows - 1 - r) * cell),
+                            size=(cell + 0.15, cell + 0.15)
+                        ))
+
+
 class LoginPopup(Popup):
     def __init__(self, app, **kwargs):
         super().__init__(
@@ -391,7 +430,7 @@ class LoginPopup(Popup):
             Color(1, 1, 1, 1)
             qr_shell._qr_bg = RoundedRectangle(pos=qr_shell.pos, size=qr_shell.size, radius=[dp(14)])
         qr_shell.bind(pos=lambda obj, *_: setattr(obj._qr_bg, 'pos', obj.pos), size=lambda obj, *_: setattr(obj._qr_bg, 'size', obj.size))
-        self.qr_image = Image(size_hint=(1, 1), allow_stretch=True, keep_ratio=True)
+        self.qr_image = QRMatrixWidget(size_hint=(1, 1))
         qr_shell.add_widget(self.qr_image)
         direct = PinkButton(
             text='打开 B 站登录（优先 App）',
@@ -448,22 +487,20 @@ class LoginPopup(Popup):
                 )
                 qr.add_data(url)
                 qr.make(fit=True)
-                image = qr.make_image(
-                    fill_color='black',
-                    back_color='white',
-                ).convert('RGB')
-                buf = io.BytesIO()
-                image.save(buf, format='PNG')
-                buf.seek(0)
-                texture = CoreImage(buf, ext='png').texture
+                matrix = qr.get_matrix()
 
                 @mainthread
                 def show():
                     if stop.is_set():
                         return
-                    self.qr_key = key
-                    self.qr_image.texture = texture
-                    self.status.text = '请用 B 站 App 扫码确认登录'
+                    try:
+                        # Draw modules using Kivy canvas: QR display no longer depends on Pillow.
+                        self.qr_key = key
+                        self.qr_image.set_matrix(matrix)
+                        self.qr_image.opacity = 1
+                        self.status.text = '请用 B 站 App 扫码确认登录'
+                    except Exception as image_exc:
+                        self.status.text = '二维码显示失败：' + safe_text(image_exc, 100)
 
                 show()
 
@@ -579,11 +616,148 @@ def apply_screen_background(screen, color=BG):
     screen.bind(pos=sync, size=sync)
 
 
+def _fetch_cover_bytes(url, session=None, cache_dir=None, timeout=(6, 12)):
+    """Fetch Bilibili CDN covers with browser-like headers, bounded retries and disk cache."""
+    url = safe_text(url, 2048).strip()
+    if url.startswith('//'):
+        url = 'https:' + url
+    if not url.startswith(('https://', 'http://')):
+        return None
+    cache_path = None
+    try:
+        if cache_dir:
+            cache_root = Path(cache_dir)
+            cache_root.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_root / (hashlib.sha256(url.encode('utf-8')).hexdigest() + '.img')
+            if cache_path.is_file() and 0 < cache_path.stat().st_size <= 20 * 1024 * 1024:
+                return cache_path.read_bytes()
+    except Exception:
+        cache_path = None
+
+    headers = {
+        'Referer': 'https://www.bilibili.com/',
+        'Origin': 'https://www.bilibili.com',
+        'User-Agent': ('Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 '
+                       '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'),
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.7',
+    }
+    requester = session if session is not None else requests
+    for attempt in range(3):
+        try:
+            response = requester.get(url, timeout=timeout, headers=headers)
+            if response.status_code == 403:
+                # One clean-session retry can help when the API session has stale headers.
+                if attempt == 0 and session is not None:
+                    requester = requests
+                    continue
+                return None
+            response.raise_for_status()
+            raw = response.content
+            if not raw or len(raw) > 20 * 1024 * 1024:
+                return None
+            # Reject HTML error pages that sometimes arrive with HTTP 200.
+            prefix = raw[:256].lstrip().lower()
+            if prefix.startswith(b'<!doctype html') or prefix.startswith(b'<html'):
+                return None
+            if cache_path is not None:
+                try:
+                    cache_path.write_bytes(raw)
+                except Exception:
+                    pass
+            return raw
+        except Exception:
+            if attempt >= 2:
+                break
+            time.sleep(0.25 * (attempt + 1))
+    return None
+
+
+def _image_texture_from_bytes(raw, max_size=(900, 600)):
+    """Decode a still image; use Pillow when present, otherwise Kivy's providers."""
+    try:
+        from PIL import Image as PILImage
+        with PILImage.open(io.BytesIO(raw)) as source:
+            source.seek(0)
+            im = source.convert('RGB')
+            im.thumbnail(max_size)
+        buf = io.BytesIO()
+        im.save(buf, format='JPEG', quality=86)
+        buf.seek(0)
+        return CoreImage(buf, ext='jpg').texture
+    except ImportError:
+        # Kivy's built-in providers can decode common PNG/JPEG formats without Pillow.
+        return CoreImage(io.BytesIO(raw)).texture
+
+
+def _set_image_from_bytes(widget, raw, max_size=(900, 600)):
+    """Display animated GIF/WebP when Pillow is installed; gracefully show stills otherwise."""
+    from kivy.clock import Clock
+    previous = getattr(widget, '_cover_anim_event', None)
+    if previous is not None:
+        try:
+            previous.cancel()
+        except Exception:
+            pass
+        widget._cover_anim_event = None
+
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        # No Pillow: don't fail the card. Let Kivy decode static formats directly.
+        widget.texture = CoreImage(io.BytesIO(raw)).texture
+        return 1
+
+    frames, durations = [], []
+    with PILImage.open(io.BytesIO(raw)) as source:
+        total = int(getattr(source, 'n_frames', 1) or 1)
+        indices = list(range(min(total, 36)))
+        if total > 36:
+            indices = [round(i * (total - 1) / 35) for i in range(36)]
+        for idx in indices:
+            try:
+                source.seek(idx)
+                frame = source.convert('RGBA')
+                frame.thumbnail(max_size)
+                # Encode PNG to preserve alpha rather than flattening every frame to JPEG.
+                buf = io.BytesIO()
+                frame.save(buf, format='PNG', optimize=True)
+                buf.seek(0)
+                frames.append(CoreImage(buf, ext='png').texture)
+                durations.append(max(0.08, min(1.0, float(source.info.get('duration', 100)) / 1000.0)))
+            except Exception:
+                continue
+
+    if not frames:
+        # Last-chance direct decode; this covers providers that support the source format.
+        widget.texture = CoreImage(io.BytesIO(raw)).texture
+        return 1
+    widget.texture = frames[0]
+    if len(frames) > 1:
+        state = {'index': 0, 'elapsed': 0.0}
+        def advance(dt):
+            if not getattr(widget, 'parent', None):
+                return True
+            state['elapsed'] += dt
+            if state['elapsed'] >= durations[state['index']]:
+                state['elapsed'] = 0.0
+                state['index'] = (state['index'] + 1) % len(frames)
+                widget.texture = frames[state['index']]
+        widget._cover_anim_event = Clock.schedule_interval(advance, 1.0 / 30.0)
+    return len(frames)
+
+
 def _open_path_with_android(path, is_directory=False):
-    """Open a media file with Android; folder opening uses a file-manager intent when supported."""
+    """Open exported media through a shareable content URI, or open the public app folder."""
     target = Path(str(path)).expanduser()
-    if platform != 'android' or not target.exists():
-        return False
+    if platform != 'android':
+        try:
+            import webbrowser
+            if target.exists() and not is_directory:
+                return False
+            return False
+        except Exception:
+            return False
     try:
         from jnius import autoclass
         Intent = autoclass('android.content.Intent')
@@ -591,20 +765,45 @@ def _open_path_with_android(path, is_directory=False):
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         activity = PythonActivity.mActivity
         if is_directory:
-            # Android has no universal "open this arbitrary folder" API for app-private paths.
-            # Try a file-manager URI first; do not silently report success if no handler exists.
+            # Open the shared Download/bilibilidl folder in Android's document UI.
+            uri = Uri.parse('content://com.android.externalstorage.documents/root/primary%3ADownload%2Fbilibilidl')
             intent = Intent(Intent.ACTION_VIEW)
-            intent.setDataAndType(Uri.parse('file://' + urllib.parse.quote(str(target.resolve()), safe='/:')), 'resource/folder')
-        else:
-            intent = Intent(Intent.ACTION_VIEW)
-            intent.setDataAndType(Uri.parse('file://' + urllib.parse.quote(str(target.resolve()), safe='/:')), _mime_for_file(target))
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if intent.resolveActivity(activity.getPackageManager()) is None:
+            intent.setDataAndType(uri, 'vnd.android.document/directory')
+            if intent.resolveActivity(activity.getPackageManager()) is None:
+                # Fallback: open the general Downloads screen.
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(Uri.parse('content://com.android.externalstorage.documents/root/primary%3ADownload'), 'vnd.android.document/directory')
+            if intent.resolveActivity(activity.getPackageManager()) is None:
+                return False
+            activity.startActivity(intent)
+            return True
+
+        if not target.is_file():
             return False
+        # MediaMerger uses MediaStore/Downloads and returns a public content:// URI.
+        # App-private file:// URIs cannot be opened by other apps on modern Android.
+        try:
+            MediaMerger = autoclass('org.bilibilidl.MediaMerger')
+            uri_string = str(MediaMerger.exportToDownloads(activity, str(target.resolve()), target.name))
+            if not uri_string.startswith('content://'):
+                return False
+            uri = Uri.parse(uri_string)
+        except Exception:
+            return False
+        intent = Intent(Intent.ACTION_VIEW)
+        intent.setDataAndType(uri, _mime_for_file(target))
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if intent.resolveActivity(activity.getPackageManager()) is None:
+            # Let Android show the chooser for installed compatible viewers.
+            intent = Intent(Intent.ACTION_SEND)
+            intent.setType(_mime_for_file(target))
+            intent.putExtra(Intent.EXTRA_STREAM, uri)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            intent = Intent.createChooser(intent, '查看文件')
         activity.startActivity(intent)
         return True
-    except Exception:
+    except Exception as exc:
+        print('[bilibilidl] open path failed:', safe_text(exc, 180))
         return False
 
 
@@ -655,7 +854,20 @@ class DownloadedScreen(Screen):
                     except (OSError, PermissionError):
                         continue
             candidates.sort(key=lambda entry: entry[0], reverse=True)
-            files = [(item, size, mtime) for mtime, item, size in candidates[:500]]
+            raw_files = [(item, size, mtime) for mtime, item, size in candidates[:500]]
+            video_exts = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.ts'}
+            image_exts = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+            video_stems = {item.stem.lower() for item, _, _ in raw_files if item.suffix.lower() in video_exts}
+            def associated_cover(item):
+                if item.suffix.lower() not in image_exts:
+                    return False
+                stem = item.stem.lower()
+                base = re.sub(r'([_-]cover|[.]cover|_封面)$', '', stem, flags=re.I)
+                base = re.sub(r'([_-]p\d+)$', '', base, flags=re.I)
+                if stem.endswith(('_cover', '-cover', '.cover', '_封面')):
+                    return True
+                return base in video_stems or stem in video_stems
+            files = [(item, size, mtime) for item, size, mtime in raw_files if not associated_cover(item)]
         except Exception:
             files = []
 
@@ -703,9 +915,14 @@ class DownloadedScreen(Screen):
                 except Exception:
                     cover_path = None
             if cover_path:
-                thumb.source = str(cover_path)
-                thumb.reload()
-            thumb.bind(on_touch_down=lambda widget, touch: _open_path_with_android(f) if widget.collide_point(*touch.pos) else None)
+                try:
+                    # Local sidecar/cache images may be WebP or GIF, which Android's
+                    # Kivy image provider may not decode consistently. Normalize via Pillow.
+                    _set_image_from_bytes(thumb, cover_path.read_bytes(), (360, 360))
+                except Exception:
+                    thumb.source = str(cover_path)
+                    thumb.reload()
+            # Thumbnail is display-only; action buttons own all file-open interactions.
             card.add_widget(thumb)
 
             info = BoxLayout(orientation='vertical', spacing=dp(3), size_hint_x=1)
@@ -814,9 +1031,34 @@ class ProfileScreen(Screen):
         settings.add_widget(ui_label('应用信息', 16, INK, 28, bold=True))
         settings.add_widget(ui_label('bilibilidl · 本地下载工具', 13, GRAY, 24))
         settings.add_widget(ui_label('文件默认保存在应用本地目录；导出文件位于 Download/bilibilidl。', 12, GRAY, 45))
+        repo_btn = PinkButton(text='项目 GitHub 仓库  ↗', bg=PALE, fg=PINK,
+                              size_hint_y=None, height=dp(42))
+        repo_btn.bind(on_release=lambda *_: self._open_repository())
+        settings.add_widget(repo_btn)
+        settings.height = dp(198)
         self.body.add_widget(settings)
         self.body.height = self.body.minimum_height
         self._scroll.scroll_y = min(1, max(0, old_scroll_y))
+
+
+    def _open_repository(self):
+        url = 'https://github.com/sxsbsxs/bilibilidl'
+        try:
+            if platform == 'android':
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                PythonActivity.mActivity.startActivity(intent)
+            else:
+                import webbrowser
+                webbrowser.open(url)
+        except Exception:
+            try:
+                self.app_ref.show_toast('无法打开仓库，请检查浏览器是否可用。')
+            except Exception:
+                pass
 
 
 class HomeScreen(Screen):
@@ -1031,21 +1273,11 @@ class HomeScreen(Screen):
                 cover_url = safe_text(info.get('pic'), 2048)
                 if cover_url.startswith('//'):
                     cover_url = 'https:' + cover_url
-                cover = None
-                if cover_url.startswith(('https://', 'http://')):
-                    try:
-                        response = session.get(
-                            cover_url,
-                            timeout=(8, 15),
-                            headers={
-                                'Referer': 'https://www.bilibili.com/'
-                            }
-                        )
-                        response.raise_for_status()
-                        if len(response.content) <= 20 * 1024 * 1024:
-                            cover = response.content
-                    except Exception:
-                        pass
+                cover = _fetch_cover_bytes(
+                    cover_url,
+                    session=session,
+                    cache_dir=Path(self.app_ref.user_data_dir) / 'cover_cache',
+                )
 
                 @mainthread
                 def done():
@@ -1085,20 +1317,23 @@ class HomeScreen(Screen):
                     if cover:
                         try:
                             self._set_cover_preview(cover)
-                            texture = CoreImage(io.BytesIO(cover)).texture
-                            self.task_cover.texture = texture
+                            _set_image_from_bytes(self.task_cover, cover, (600, 420))
                         except Exception:
                             self.cover_preview.texture = None
                             self.task_cover.texture = None
                     elif cover_url:
-                        # B站封面 CDN 偶尔拒绝默认请求头；尝试常见图片格式并统一显示。
+                        # Retry through the same header-aware, cached fetch path; never block playback if CDN rejects it.
                         try:
-                            r = requests.get(cover_url, timeout=(8, 15), headers={'Referer': 'https://www.bilibili.com/', 'User-Agent': 'Mozilla/5.0'})
-                            r.raise_for_status()
-                            if r.content and len(r.content) <= 20 * 1024 * 1024:
-                                self.cover_bytes = r.content
-                                self._set_cover_preview(r.content)
-                                self.task_cover.texture = CoreImage(io.BytesIO(r.content)).texture
+                            raw_cover = _fetch_cover_bytes(
+                                cover_url,
+                                cache_dir=Path(self.app_ref.user_data_dir) / 'cover_cache',
+                            )
+                            if raw_cover:
+                                self.cover_bytes = raw_cover
+                                self._set_cover_preview(raw_cover)
+                                _set_image_from_bytes(self.task_cover, raw_cover, (600, 420))
+                            else:
+                                self.result_label.text = '解析成功，但封面 CDN 暂时拒绝或网络不可用；可继续下载。'
                         except Exception:
                             self.result_label.text = '解析成功，但封面暂时加载失败；可继续下载。'
                     self.result_label.text = (
@@ -1125,18 +1360,10 @@ class HomeScreen(Screen):
     @mainthread
     def _set_cover_preview(self, raw):
         try:
-            from PIL import Image as PILImage
-            im = PILImage.open(io.BytesIO(raw))
-            im.seek(0)
-            im.thumbnail((720, 420))
-            buf = io.BytesIO()
-            im.convert('RGB').save(buf, format='JPEG', quality=82)
-            buf.seek(0)
-            self.cover_preview.texture = CoreImage(
-                buf, ext='jpg'
-            ).texture
-        except Exception:
+            _set_image_from_bytes(self.cover_preview, raw, (900, 600))
+        except Exception as exc:
             self.cover_preview.texture = None
+            print('[bilibilidl] cover decode failed:', safe_text(exc, 160))
 
     def choose_quality(self, *_):
         if not self.qualities:
