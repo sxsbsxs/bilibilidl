@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """bilibilidl Android UI entry point.
-
 Uses the repository's bili_api.py, login_manager.py and downloader.py interfaces.
 Network work is performed off the Kivy UI thread; failures are surfaced in the UI.
 """
@@ -14,7 +13,6 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-
 import requests
 import qrcode
 from kivy.app import App
@@ -45,13 +43,16 @@ APP_NAME = 'bilibilidl'
 FONT_REG = BASE_DIR / 'NotoSansCJKsc-Regular.ttf'
 FONT_BOLD = BASE_DIR / 'NotoSansCJKsc-Bold.ttf'
 
-PINK = (0.96, 0.36, 0.56, 1)
-PALE = (1.0, 0.93, 0.96, 1)
+PINK = (0.91, 0.20, 0.43, 1)
+PALE = (1.0, 0.95, 0.97, 1)
 WHITE = (1, 1, 1, 1)
-INK = (0.13, 0.13, 0.15, 1)
-GRAY = (0.43, 0.43, 0.47, 1)
+INK = (0.10, 0.12, 0.17, 1)
+GRAY = (0.42, 0.45, 0.51, 1)
+BG = (0.965, 0.961, 0.969, 1)
+BORDER = (0.89, 0.88, 0.91, 1)
 RED = (0.78, 0.16, 0.22, 1)
 GREEN = (0.12, 0.55, 0.32, 1)
+
 FONT = 'Roboto'
 FONT_BOLD_NAME = 'Roboto'
 
@@ -90,16 +91,12 @@ def _verified_file(path):
 def _export_to_public_downloads(path):
     """将文件导出到 Android 的 Download/bilibilidl 目录。"""
     source = _verified_file(path)
-
     if platform != 'android':
         return str(source)
-
     try:
         from jnius import autoclass
-
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         MediaMerger = autoclass('org.bilibilidl.MediaMerger')
-
         result = str(
             MediaMerger.exportToDownloads(
                 PythonActivity.mActivity,
@@ -107,10 +104,8 @@ def _export_to_public_downloads(path):
                 source.name
             )
         )
-
         if result.startswith('content://'):
             return result
-
         raise RuntimeError(
             result or '导出接口没有返回成功地址'
         )
@@ -157,18 +152,33 @@ class Card(BoxLayout):
     def __init__(self, bg=WHITE, radius=dp(18), **kwargs):
         super().__init__(**kwargs)
         self.orientation = kwargs.get('orientation', 'vertical')
-        self.padding = kwargs.get('padding', dp(12))
-        self.spacing = kwargs.get('spacing', dp(8))
+        self.padding = kwargs.get('padding', dp(16))
+        self.spacing = kwargs.get('spacing', dp(10))
+        self._card_radius = radius
         with self.canvas.before:
+            Color(0.36, 0.22, 0.29, 0.055)
+            self._shadow = RoundedRectangle(
+                pos=(self.x, self.y - dp(2)), size=self.size,
+                radius=[radius + dp(1)]
+            )
             Color(*bg)
             self._rect = RoundedRectangle(
                 pos=self.pos, size=self.size, radius=[radius]
             )
+        with self.canvas.after:
+            Color(0.87, 0.84, 0.87, 0.72)
+            self._edge = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, radius),
+                width=0.65
+            )
         self.bind(pos=self._sync, size=self._sync)
 
     def _sync(self, *_):
+        self._shadow.pos = (self.x, self.y - dp(2))
+        self._shadow.size = self.size
         self._rect.pos = self.pos
         self._rect.size = self.size
+        self._edge.rounded_rectangle = (self.x, self.y, self.width, self.height, self._card_radius)
 
 
 class PinkButton(Button):
@@ -180,10 +190,11 @@ class PinkButton(Button):
         self.color = fg
         self.font_name = FONT
         self.font_size = dp(14)
+        self.bold = True
         with self.canvas.before:
             Color(*bg)
             self._rect = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(16)]
+                pos=self.pos, size=self.size, radius=[dp(18)]
             )
         self.bind(pos=self._sync, size=self._sync)
 
@@ -197,12 +208,20 @@ class PinkInput(TextInput):
         super().__init__(**kwargs)
         self.background_normal = ''
         self.background_active = ''
-        self.background_color = PALE
+        self.background_color = (0, 0, 0, 0)
         self.foreground_color = INK
         self.cursor_color = PINK
         self.font_name = FONT
         self.font_size = dp(15)
-        self.padding = [dp(12), dp(14), dp(12), dp(10)]
+        self.padding = [dp(15), dp(15), dp(15), dp(11)]
+        with self.canvas.before:
+            Color(1, 1, 1, 1)
+            self._input_bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[dp(16)])
+        self.bind(pos=self._sync_input, size=self._sync_input)
+
+    def _sync_input(self, *_):
+        self._input_bg.pos = self.pos
+        self._input_bg.size = self.size
 
 
 class SafeAvatar(BoxLayout):
@@ -258,7 +277,6 @@ class ChoicePopup(Popup):
             spacing=dp(7)
         )
         items.bind(minimum_height=items.setter('height'))
-
         for i, item in enumerate(options):
             b = PinkButton(
                 text=safe_text(item, 180),
@@ -269,7 +287,6 @@ class ChoicePopup(Popup):
             )
             b.bind(on_release=lambda _b, idx=i: self._choose(idx))
             items.add_widget(b)
-
         sc.add_widget(items)
         root.add_widget(sc)
         close = PinkButton(
@@ -300,7 +317,6 @@ class LoginPopup(Popup):
         self.app_ref = app
         self.qr_key = None
         self.stop_event = threading.Event()
-
         root = BoxLayout(
             orientation='vertical',
             padding=dp(14),
@@ -324,7 +340,6 @@ class LoginPopup(Popup):
             height=dp(44)
         )
         close.bind(on_release=lambda *_: self.dismiss())
-
         root.add_widget(self.status)
         root.add_widget(self.qr_image)
         root.add_widget(make)
@@ -342,7 +357,6 @@ class LoginPopup(Popup):
             try:
                 session = new_session()
                 url, key = qr_generate(session)
-
                 qr = qrcode.QRCode(box_size=6, border=2)
                 qr.add_data(url)
                 qr.make(fit=True)
@@ -350,7 +364,6 @@ class LoginPopup(Popup):
                     fill_color='black',
                     back_color='white'
                 ).convert('RGB')
-
                 buf = io.BytesIO()
                 image.save(buf, format='PNG')
                 buf.seek(0)
@@ -362,7 +375,6 @@ class LoginPopup(Popup):
                         self.qr_key = key
                         self.qr_image.texture = texture
                         self.status.text = '请用 B 站 App 扫码确认登录'
-
                 show()
 
                 while not stop.is_set():
@@ -378,19 +390,15 @@ class LoginPopup(Popup):
                                 Clock.schedule_once(
                                     lambda _dt: self.dismiss(), 1.0
                                 )
-
                         success()
                         return
-
                     if code == 86038:
                         @mainthread
                         def expired():
                             self.status.text = '二维码已过期，请重新生成'
                         expired()
                         return
-
                     stop.wait(1.8)
-
             except Exception as exc:
                 msg = safe_text(exc, 180)
 
@@ -398,12 +406,124 @@ class LoginPopup(Popup):
                 def fail():
                     if not stop.is_set():
                         self.status.text = '登录失败：' + msg
-
                 fail()
-
         threading.Thread(
             target=work, daemon=True, name='bili-login'
         ).start()
+
+
+class Toast(Popup):
+    """Small transient-style message used for ordinary feedback."""
+    def __init__(self, message, **kwargs):
+        super().__init__(title='', separator_height=0, size_hint=(.88, None),
+                         height=dp(72), auto_dismiss=True, **kwargs)
+        self.background = ''
+        self.background_color = (0, 0, 0, 0)
+        self.content = Card(bg=INK, radius=dp(18), padding=[dp(14), dp(8), dp(14), dp(8)])
+        self.content.add_widget(ui_label(safe_text(message, 160), 13, WHITE, 46, halign='center'))
+        Clock.schedule_once(lambda _dt: self.dismiss(), 1.8)
+
+
+def show_toast(message):
+    try:
+        Toast(message).open()
+    except Exception:
+        pass
+
+
+class DownloadedScreen(Screen):
+    def __init__(self, app, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref = app
+        self.files_box = BoxLayout(orientation='vertical', spacing=dp(10), size_hint_y=None)
+        self.files_box.bind(minimum_height=self.files_box.setter('height'))
+        root = BoxLayout(orientation='vertical', padding=[dp(17), dp(16), dp(17), dp(10)], spacing=dp(12))
+        root.add_widget(ui_label('已下载', 25, INK, 38, bold=True))
+        root.add_widget(ui_label('保存在本机的文件 · 不会因返回页面而清除', 12, GRAY, 25))
+        refresh = PinkButton(text='刷新文件列表  ↻', bg=PALE, fg=PINK, size_hint_y=None, height=dp(44))
+        refresh.bind(on_release=lambda *_: self.refresh_files())
+        root.add_widget(refresh)
+        sc = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        sc.add_widget(self.files_box)
+        root.add_widget(sc)
+        self.add_widget(root)
+
+    def refresh_files(self):
+        self.files_box.clear_widgets()
+        folder = Path(self.app_ref.user_data_dir) / 'downloads'
+        try:
+            files = sorted([x for x in folder.iterdir() if x.is_file() and x.stat().st_size > 0], key=lambda x: x.stat().st_mtime, reverse=True) if folder.exists() else []
+        except Exception:
+            files = []
+        if not files:
+            empty = Card(bg=WHITE, radius=dp(22), padding=[dp(18), dp(22), dp(18), dp(22)], spacing=dp(8), size_hint_y=None)
+            empty.add_widget(ui_label('♫', 34, PINK, 48, halign='center', bold=True))
+            empty.add_widget(ui_label('这里还空空的', 18, INK, 32, halign='center', bold=True))
+            empty.add_widget(ui_label('解析并下载一个视频后，文件会出现在这里。', 12, GRAY, 44, halign='center'))
+            self.files_box.add_widget(empty)
+            return
+        for f in files[:500]:
+            try:
+                size=f.stat().st_size
+                size_text = ('%.1f MB' % (size/1048576)) if size >= 1048576 else ('%.0f KB' % (size/1024))
+            except Exception:
+                size_text='大小未知'
+            card=Card(bg=WHITE, radius=dp(17), padding=[dp(13), dp(10), dp(13), dp(10)], spacing=dp(4), size_hint_y=None)
+            card.add_widget(ui_label(f.name, 13, INK, 42, bold=True))
+            card.add_widget(ui_label(size_text + '  ·  ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(f.stat().st_mtime)), 11, GRAY, 22))
+            btn=PinkButton(text='查看保存路径', bg=PALE, fg=PINK, size_hint_y=None, height=dp(38))
+            btn.bind(on_release=lambda _b, path=str(f): Popup(title='文件位置', content=ui_label(path, 12, INK, 80), size_hint=(.9,.32)).open())
+            card.add_widget(btn)
+            self.files_box.add_widget(card)
+
+
+class ProfileScreen(Screen):
+    def __init__(self, app, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref=app
+        self.body=BoxLayout(orientation='vertical', spacing=dp(12), size_hint_y=None)
+        self.body.bind(minimum_height=self.body.setter('height'))
+        root=BoxLayout(orientation='vertical', padding=[dp(17),dp(16),dp(17),dp(10)], spacing=dp(12))
+        root.add_widget(ui_label('我的',25,INK,38,bold=True))
+        root.add_widget(ui_label('账号信息与本地下载概览',12,GRAY,25))
+        sc=ScrollView(do_scroll_x=False,bar_width=dp(3)); sc.add_widget(self.body); root.add_widget(sc)
+        self.add_widget(root)
+        self.refresh_profile()
+
+    def refresh_profile(self):
+        self.body.clear_widgets()
+        profile=self.app_ref.profile_data if isinstance(self.app_ref.profile_data,dict) else {}
+        name=safe_text(profile.get('uname') or '尚未登录',40)
+        uid=profile.get('mid') or profile.get('uid')
+        account=Card(bg=WHITE,radius=dp(22),padding=[dp(17),dp(16),dp(17),dp(16)],spacing=dp(6),size_hint_y=None)
+        account.add_widget(ui_label('◉',30,PINK,42,halign='center',bold=True))
+        account.add_widget(ui_label(name,19,INK,32,bold=True,halign='center'))
+        account.add_widget(ui_label(('UID '+str(uid)) if uid else ('登录 B 站以查看授权账号信息'),12,GRAY,25,halign='center'))
+        login=PinkButton(text='B站授权登录' if not self.app_ref.get_cookie() else '账号登录状态',bg=PALE,fg=PINK,size_hint_y=None,height=dp(44))
+        login.bind(on_release=lambda *_: LoginPopup(self.app_ref).open())
+        account.add_widget(login); self.body.add_widget(account)
+        folder=Path(self.app_ref.user_data_dir)/'downloads'
+        try:
+            files=[x for x in folder.iterdir() if x.is_file() and x.stat().st_size>0] if folder.exists() else []
+            total=sum(x.stat().st_size for x in files)
+        except Exception:
+            files=[]; total=0
+        size=('%.2f GB'%(total/1073741824)) if total>=1073741824 else ('%.1f MB'%(total/1048576))
+        stats=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(15),dp(15),dp(15)],spacing=dp(8),size_hint_y=None)
+        stats.add_widget(ui_label('本地下载统计',16,INK,28,bold=True))
+        row=BoxLayout(size_hint_y=None,height=dp(72),spacing=dp(8))
+        for value,label in [(str(len(files)),'文件数量'),(size,'占用空间')]:
+            tile=Card(bg=PALE,radius=dp(15),padding=[dp(8),dp(8),dp(8),dp(8)],spacing=dp(2))
+            tile.add_widget(ui_label(value,17,PINK,28,bold=True,halign='center'))
+            tile.add_widget(ui_label(label,11,GRAY,22,halign='center'))
+            row.add_widget(tile)
+        stats.add_widget(row); self.body.add_widget(stats)
+        settings=Card(bg=WHITE,radius=dp(22),padding=[dp(15),dp(14),dp(15),dp(14)],spacing=dp(7),size_hint_y=None)
+        settings.add_widget(ui_label('应用信息',16,INK,28,bold=True))
+        settings.add_widget(ui_label('bilibilidl · 本地下载工具',13,GRAY,24))
+        settings.add_widget(ui_label('文件默认保存在应用本地目录；导出文件位于 Download/bilibilidl。',12,GRAY,45))
+        clear=PinkButton(text='清理封面缓存暂不可用',bg=(.94,.94,.96,1),fg=GRAY,size_hint_y=None,height=dp(42),disabled=True)
+        settings.add_widget(clear); self.body.add_widget(settings)
 
 
 class HomeScreen(Screen):
@@ -430,148 +550,120 @@ class HomeScreen(Screen):
         self.cancel_event = threading.Event()
         self._parse_generation = 0
 
-        outer = BoxLayout(
-            orientation='vertical',
-            spacing=dp(8),
-            padding=[dp(12), dp(8), dp(12), dp(8)]
-        )
-        header = BoxLayout(
-            size_hint_y=None, height=dp(48), spacing=dp(8)
-        )
-        header.add_widget(
-            ui_label('bilibilidl', 22, INK, 44, bold=True)
-        )
+        with self.canvas.before:
+            Color(*BG)
+            self._screen_bg = RoundedRectangle(pos=self.pos, size=self.size, radius=[0])
+        self.bind(pos=self._sync_screen_bg, size=self._sync_screen_bg)
+
+        outer = BoxLayout(orientation='vertical', spacing=dp(0), padding=[dp(17), dp(7), dp(17), dp(8)])
+        header = BoxLayout(size_hint_y=None, height=dp(64), spacing=dp(10), padding=[dp(2), dp(1), dp(2), dp(3)])
+        brand = BoxLayout(orientation='vertical', spacing=dp(0))
+        brand.add_widget(ui_label('bilibilidl', 24, INK, 33, bold=True))
+        brand.add_widget(ui_label('BILIBILI VIDEO TOOL  /  LOCAL', 9, GRAY, 20, bold=True))
+        header.add_widget(brand)
         header.add_widget(Widget())
-        self.account_btn = PinkButton(
-            text='B站授权登录',
-            bg=PALE,
-            fg=INK,
-            size_hint_x=None,
-            width=dp(132),
-            height=dp(42)
-        )
+        self.account_btn = PinkButton(text='登录 B 站  ↗', bg=WHITE, fg=PINK, size_hint_x=None, width=dp(116), height=dp(42))
         self.account_btn.bind(on_release=self.open_login)
         header.add_widget(self.account_btn)
         outer.add_widget(header)
 
-        sc = ScrollView(do_scroll_x=False, bar_width=dp(3))
-        content = BoxLayout(
-            orientation='vertical',
-            size_hint_y=None,
-            spacing=dp(12),
-            padding=[dp(2), dp(4), dp(2), dp(18)]
-        )
+        sc = ScrollView(do_scroll_x=False, bar_width=dp(3), scroll_type=['bars', 'content'])
+        content = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(12), padding=[dp(0), dp(5), dp(0), dp(24)])
         content.bind(minimum_height=content.setter('height'))
 
-        self.link_input = PinkInput(
-            hint_text='粘贴 BV / AV / 视频链接 / b23.tv',
-            multiline=False,
-            size_hint_y=None,
-            height=dp(54)
-        )
-        content.add_widget(self.link_input)
-
-        self.parse_btn = PinkButton(
-            text='解析视频',
-            size_hint_y=None,
-            height=dp(50)
-        )
+        # Hero / paste link card
+        hero = Card(bg=WHITE, radius=dp(23), padding=[dp(18), dp(16), dp(18), dp(17)], spacing=dp(9), size_hint_y=None)
+        hero.bind(minimum_height=hero.setter('height'))
+        hero.add_widget(ui_label('VIDEO  /  DOWNLOADER', 10, PINK, 20, bold=True))
+        hero.add_widget(ui_label('把喜欢的视频，\n认真保存下来。', 23, INK, 62, bold=True))
+        hero.add_widget(ui_label('支持 BV 号、AV 号、视频链接与 b23.tv 短链', 12, GRAY, 24))
+        input_shell = BoxLayout(size_hint_y=None, height=dp(54), padding=[dp(2), dp(2), dp(2), dp(2)])
+        self.link_input = PinkInput(hint_text='粘贴视频链接、BV 号或 AV 号…', multiline=False, size_hint_y=None, height=dp(50))
+        input_shell.add_widget(self.link_input)
+        hero.add_widget(input_shell)
+        self.parse_btn = PinkButton(text='解析视频  →', bg=PINK, fg=WHITE, size_hint_y=None, height=dp(50))
         self.parse_btn.bind(on_release=self.parse)
-        content.add_widget(self.parse_btn)
+        hero.add_widget(self.parse_btn)
+        content.add_widget(hero)
 
-        self.result_label = ui_label(
-            '输入视频链接后解析，清晰度与分P将按接口实际返回显示。',
-            13, GRAY, 62, halign='center'
-        )
-        content.add_widget(self.result_label)
+        # Status card
+        status_card = Card(bg=WHITE, radius=dp(19), padding=[dp(16), dp(12), dp(16), dp(12)], spacing=dp(4), size_hint_y=None)
+        status_card.bind(minimum_height=status_card.setter('height'))
+        status_card.add_widget(ui_label('解析状态', 13, GRAY, 22, bold=True))
+        self.result_label = ui_label('先粘贴视频链接并解析，封面、清晰度和分 P 会显示在下方。', 13, INK, 44)
+        status_card.add_widget(self.result_label)
+        content.add_widget(status_card)
 
-        self.cover_preview = Image(
-            size_hint_y=None,
-            height=dp(150),
-            allow_stretch=True,
-            keep_ratio=True
-        )
-        content.add_widget(self.cover_preview)
+        # Video info card with thumbnail and title
+        video_card = Card(bg=WHITE, radius=dp(19), padding=[dp(14), dp(14), dp(14), dp(14)], spacing=dp(9), size_hint_y=None)
+        video_card.bind(minimum_height=video_card.setter('height'))
+        video_card.add_widget(ui_label('视频信息', 16, INK, 26, bold=True))
+        self.cover_preview = Image(size_hint_y=None, height=dp(202), allow_stretch=True, keep_ratio=True)
+        video_card.add_widget(self.cover_preview)
+        self.title_label = ui_label('解析后显示视频标题', 18, INK, 54, bold=True)
+        video_card.add_widget(self.title_label)
+        self.owner_label = ui_label('UP 主 · 播放信息 · 视频时长', 12, GRAY, 28)
+        video_card.add_widget(self.owner_label)
+        content.add_widget(video_card)
 
-        self.title_label = ui_label('', 16, INK, 48, bold=True)
-        content.add_widget(self.title_label)
-        self.owner_label = ui_label('', 12, GRAY, 26)
-        content.add_widget(self.owner_label)
-
-        self.quality_btn = PinkButton(
-            text='清晰度：请先解析',
-            bg=PALE, fg=INK,
-            size_hint_y=None, height=dp(46)
-        )
+        # Download options
+        options = Card(bg=WHITE, radius=dp(19), padding=[dp(16), dp(14), dp(16), dp(16)], spacing=dp(10), size_hint_y=None)
+        options.bind(minimum_height=options.setter('height'))
+        options.add_widget(ui_label('下载设置', 16, INK, 26, bold=True))
+        options.add_widget(ui_label('清晰度', 12, GRAY, 20, bold=True))
+        self.quality_btn = PinkButton(text='请先解析视频', bg=PALE, fg=INK, size_hint_y=None, height=dp(48))
         self.quality_btn.bind(on_release=self.choose_quality)
-        content.add_widget(self.quality_btn)
-
-        self.mode_btn = PinkButton(
-            text=self.MODES[0],
-            bg=PALE, fg=INK,
-            size_hint_y=None, height=dp(46)
-        )
+        options.add_widget(self.quality_btn)
+        options.add_widget(ui_label('保存内容', 12, GRAY, 20, bold=True))
+        self.mode_btn = PinkButton(text=self.MODES[0], bg=PALE, fg=INK, size_hint_y=None, height=dp(48))
         self.mode_btn.bind(on_release=self.choose_mode)
-        content.add_widget(self.mode_btn)
+        options.add_widget(self.mode_btn)
+        content.add_widget(options)
 
-        part_row = BoxLayout(
-            size_hint_y=None, height=dp(42), spacing=dp(8)
-        )
-        part_row.add_widget(ui_label('分P列表', 15, INK, 36, bold=True))
+        # Parts selector
+        parts_card = Card(bg=WHITE, radius=dp(19), padding=[dp(16), dp(14), dp(16), dp(14)], spacing=dp(8), size_hint_y=None)
+        parts_card.bind(minimum_height=parts_card.setter('height'))
+        part_row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        part_row.add_widget(ui_label('分P列表', 16, INK, 34, bold=True))
         part_row.add_widget(Widget())
-        self.all_btn = PinkButton(
-            text='全部分P：关闭',
-            bg=PALE, fg=INK,
-            size_hint_x=None, width=dp(145), height=dp(38)
-        )
+        self.all_btn = PinkButton(text='批量下载：关闭', bg=PALE, fg=PINK, size_hint_x=None, width=dp(142), height=dp(38))
         self.all_btn.bind(on_release=self.toggle_all)
         part_row.add_widget(self.all_btn)
-        content.add_widget(part_row)
-
-        self.part_list = BoxLayout(
-            orientation='vertical',
-            size_hint_y=None,
-            spacing=dp(6)
-        )
+        parts_card.add_widget(part_row)
+        parts_card.add_widget(ui_label('点选单个分 P；开启批量模式即可依次下载全部分 P。', 12, GRAY, 30))
+        self.part_list = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(7))
         self.part_list.bind(minimum_height=self.part_list.setter('height'))
-        content.add_widget(self.part_list)
+        parts_card.add_widget(self.part_list)
+        content.add_widget(parts_card)
 
-        self.download_btn = PinkButton(
-            text='开始下载',
-            size_hint_y=None, height=dp(54)
-        )
+        # Task panel
+        task_card = Card(bg=WHITE, radius=dp(19), padding=[dp(16), dp(14), dp(16), dp(16)], spacing=dp(9), size_hint_y=None)
+        task_card.bind(minimum_height=task_card.setter('height'))
+        task_card.add_widget(ui_label('下载任务', 16, INK, 26, bold=True))
+        self.download_btn = PinkButton(text='开始下载  →', size_hint_y=None, height=dp(54))
         self.download_btn.bind(on_release=self.start_download)
-        content.add_widget(self.download_btn)
-
-        self.progress = ProgressBar(
-            max=100, value=0,
-            size_hint_y=None, height=dp(8)
-        )
-        content.add_widget(self.progress)
-        self.task_label = ui_label('准备就绪', 12, GRAY, 44)
-        content.add_widget(self.task_label)
-
-        self.cancel_btn = PinkButton(
-            text='取消当前任务',
-            bg=(.78, .78, .8, 1),
-            size_hint_y=None, height=dp(42),
-            disabled=True
-        )
+        task_card.add_widget(self.download_btn)
+        self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
+        task_card.add_widget(self.progress)
+        self.task_label = ui_label('准备就绪 · 下载完成后保存到 Download/bilibilidl', 12, GRAY, 42)
+        task_card.add_widget(self.task_label)
+        self.cancel_btn = PinkButton(text='取消当前任务', bg=(.91, .92, .94, 1), fg=INK, size_hint_y=None, height=dp(44), disabled=True)
         self.cancel_btn.bind(on_release=self.cancel_download)
-        content.add_widget(self.cancel_btn)
-
-        self.history_btn = PinkButton(
-            text='打开下载目录',
-            bg=PALE, fg=INK,
-            size_hint_y=None, height=dp(42)
-        )
+        task_card.add_widget(self.cancel_btn)
+        self.history_btn = PinkButton(text='查看已下载文件  ↗', bg=PALE, fg=PINK, size_hint_y=None, height=dp(46))
         self.history_btn.bind(on_release=self.show_download_location)
-        content.add_widget(self.history_btn)
+        task_card.add_widget(self.history_btn)
+        content.add_widget(task_card)
 
+        content.add_widget(ui_label('bilibilidl  /  为每一次收藏留一份本地备份', 11, GRAY, 34, halign='center'))
         sc.add_widget(content)
         outer.add_widget(sc)
         self.add_widget(outer)
         self.refresh_parts()
+
+    def _sync_screen_bg(self, *_):
+        self._screen_bg.pos = self.pos
+        self._screen_bg.size = self.size
 
     def open_login(self, *_):
         LoginPopup(self.app_ref).open()
@@ -591,12 +683,10 @@ class HomeScreen(Screen):
         if self.busy:
             self.result_label.text = '当前任务正在运行，请等待或取消后再解析。'
             return
-
         text = self.link_input.text.strip()
         if not text:
             self.result_label.text = '请先输入 BV / AV / B站视频链接。'
             return
-
         self._parse_generation += 1
         generation = self._parse_generation
         self.parse_btn.disabled = True
@@ -608,7 +698,6 @@ class HomeScreen(Screen):
                 session = new_session(cookie)
                 info = get_video_info(session, text)
                 pages = info.get('pages') or []
-
                 if not pages:
                     pages = [{
                         'page': 1,
@@ -616,19 +705,16 @@ class HomeScreen(Screen):
                         'part': info.get('title') or 'P1',
                         'duration': info.get('duration', 0)
                     }]
-
                 play = get_play_info(session, info, cookie)
                 data = play.get('data') or {}
                 qns = data.get('accept_quality') or []
                 descs = data.get('accept_description') or []
                 qlist = []
-
                 for i, qn in enumerate(qns):
                     try:
                         qn = int(qn)
                     except Exception:
                         continue
-
                     desc = safe_text(
                         descs[i] if i < len(descs)
                         else ('画质 ' + str(qn)),
@@ -637,14 +723,11 @@ class HomeScreen(Screen):
                     if qn >= 80 and not cookie:
                         continue
                     qlist.append((qn, desc))
-
                 if not qlist:
                     qlist = [(0, '接口默认画质')]
-
                 cover_url = safe_text(info.get('pic'), 2048)
                 if cover_url.startswith('//'):
                     cover_url = 'https:' + cover_url
-
                 cover = None
                 if cover_url.startswith(('https://', 'http://')):
                     try:
@@ -665,7 +748,6 @@ class HomeScreen(Screen):
                 def done():
                     if generation != self._parse_generation:
                         return
-
                     self.info = info
                     self.pages = pages
                     self.qualities = qlist
@@ -674,7 +756,6 @@ class HomeScreen(Screen):
                     self.all_pages = False
                     self.cover_url = cover_url
                     self.cover_bytes = cover
-
                     self.title_label.text = safe_text(
                         info.get('title'), 180
                     )
@@ -688,19 +769,16 @@ class HomeScreen(Screen):
                         + '    时长：'
                         + fmt_duration(info.get('duration'))
                     )
-
                     self.quality_btn.text = (
                         '清晰度：' + qlist[0][1]
                         + (' (%s)' % qlist[0][0] if qlist[0][0] else '')
                     )
-
                     self.cover_preview.source = ''
                     if cover:
                         try:
                             self._set_cover_preview(cover)
                         except Exception:
                             self.cover_preview.source = ''
-
                     self.result_label.text = (
                         '解析成功：%d 个分P。可选择单P或全部分P。'
                         % len(pages)
@@ -708,9 +786,7 @@ class HomeScreen(Screen):
                     self.all_btn.text = '全部分P：关闭'
                     self.refresh_parts()
                     self.parse_btn.disabled = False
-
                 done()
-
             except Exception as exc:
                 message = safe_text(exc, 220)
 
@@ -719,12 +795,11 @@ class HomeScreen(Screen):
                     if generation == self._parse_generation:
                         self.result_label.text = '解析失败：' + message
                         self.parse_btn.disabled = False
-
                 failed()
-
         threading.Thread(
             target=worker, daemon=True, name='bili-parse'
         ).start()
+
     @mainthread
     def _set_cover_preview(self, raw):
         try:
@@ -744,7 +819,6 @@ class HomeScreen(Screen):
     def choose_quality(self, *_):
         if not self.qualities:
             return
-
         options = [
             '%s%s' % (desc, (' (%s)' % qn) if qn else '')
             for qn, desc in self.qualities
@@ -756,7 +830,6 @@ class HomeScreen(Screen):
             self.quality_btn.text = (
                 '清晰度：' + desc + (' (%s)' % qn if qn else '')
             )
-
         ChoicePopup(
             '选择清晰度', options, self.quality_index, selected
         ).open()
@@ -765,7 +838,6 @@ class HomeScreen(Screen):
         def selected(idx):
             self.mode_index = idx
             self.mode_btn.text = self.MODES[idx]
-
         ChoicePopup(
             '选择下载类型', self.MODES, self.mode_index, selected
         ).open()
@@ -780,13 +852,11 @@ class HomeScreen(Screen):
     @mainthread
     def refresh_parts(self):
         self.part_list.clear_widgets()
-
         if not self.pages:
             self.part_list.add_widget(
                 ui_label('解析后显示分P列表。', 12, GRAY, 34)
             )
             return
-
         for idx, page in enumerate(self.pages):
             chosen = self.all_pages or idx == self.selected_page
             title = safe_text(
@@ -817,7 +887,6 @@ class HomeScreen(Screen):
             root = Path(App.get_running_app().user_data_dir) / 'downloads'
         except Exception:
             root = BASE_DIR / 'downloads'
-
         root.mkdir(parents=True, exist_ok=True)
         return root
 
@@ -825,30 +894,24 @@ class HomeScreen(Screen):
         if self.busy:
             self.task_label.text = '已有任务运行中。'
             return
-
         if not self.info or not self.pages:
             self.result_label.text = '请先成功解析视频。'
             return
-
         if self.all_pages:
             pages = [dict(p) for p in self.pages]
         else:
             pages = [dict(self.pages[self.selected_page])]
-
         if self.mode_index == 0 and not self.qualities:
             self.result_label.text = '没有可用清晰度，请重新解析。'
             return
-
         self.busy = True
         self.cancel_event = threading.Event()
         cancel = self.cancel_event
-
         self.download_btn.disabled = True
         self.parse_btn.disabled = True
         self.cancel_btn.disabled = False
         self.progress.value = 0
         self.task_label.text = '正在准备下载…'
-
         info_snapshot = dict(self.info)
         cookie = self.app_ref.get_cookie() or ''
         mode = self.mode_index
@@ -868,24 +931,19 @@ class HomeScreen(Screen):
                     self.progress.value = max(
                         0, min(100, float(pct))
                     )
-
             update()
 
         def worker():
             successes, failures = [], []
-
             try:
                 for order, page in enumerate(pages):
                     if cancel.is_set():
                         break
-
                     page_no = int(page.get('page') or (order + 1))
                     cid = page.get('cid')
-
                     if not cid:
                         failures.append('P%d：缺少 cid' % page_no)
                         continue
-
                     bvid = safe_text(
                         info_snapshot.get('bvid') or 'video', 40
                     )
@@ -895,7 +953,6 @@ class HomeScreen(Screen):
                     part_title = safe_name(
                         page.get('part') or ('P%d' % page_no)
                     )
-
                     try:
                         if mode == 0:
                             part_info = dict(info_snapshot)
@@ -912,7 +969,6 @@ class HomeScreen(Screen):
                                     % (page_no, pct),
                                     pct
                                 )
-
                             result = download_video(
                                 part_info,
                                 cookie,
@@ -924,7 +980,6 @@ class HomeScreen(Screen):
                                     'P%d：%s' % (page_no, msg)
                                 )
                             )
-
                             verified = _verified_file(result)
                             public_uri = _export_to_public_downloads(
                                 verified
@@ -937,14 +992,12 @@ class HomeScreen(Screen):
                                     else ''
                                 )
                             )
-
                         elif mode == 1:
                             raw = self.cover_bytes
                             if not raw:
                                 raise RuntimeError(
                                     '封面原始数据为空，请重新解析'
                                 )
-
                             if raw.startswith((b'GIF87a', b'GIF89a')):
                                 ext = 'gif'
                             elif (
@@ -960,7 +1013,6 @@ class HomeScreen(Screen):
                                 raise RuntimeError(
                                     '无法识别封面格式，已拒绝保存'
                                 )
-
                             dest = out_dir / (bvid + '_cover.' + ext)
                             dest.write_bytes(raw)
                             verified = _verified_file(dest)
@@ -975,7 +1027,6 @@ class HomeScreen(Screen):
                                     else ''
                                 )
                             )
-
                         elif mode == 2:
                             session = new_session(cookie)
                             url = (
@@ -987,12 +1038,10 @@ class HomeScreen(Screen):
                             )
                             resp.raise_for_status()
                             data = resp.content
-
                             if not data or b'<i' not in data[:1000]:
                                 raise RuntimeError(
                                     '该分P没有可用弹幕 XML'
                                 )
-
                             dest = out_dir / (
                                 bvid + '_P%d_danmaku.xml' % page_no
                             )
@@ -1009,16 +1058,13 @@ class HomeScreen(Screen):
                                     else ''
                                 )
                             )
-
                         elif mode == 3:
                             session = new_session(cookie)
                             params = {'cid': cid}
-
                             if info_snapshot.get('bvid'):
                                 params['bvid'] = info_snapshot['bvid']
                             elif info_snapshot.get('aid'):
                                 params['aid'] = info_snapshot['aid']
-
                             resp = session.get(
                                 'https://api.bilibili.com/x/player/v2',
                                 params=params,
@@ -1026,27 +1072,23 @@ class HomeScreen(Screen):
                             )
                             resp.raise_for_status()
                             jdata = resp.json()
-
                             subs = (
                                 ((jdata.get('data') or {}).get('subtitle') or {})
                                 .get('subtitles') or []
                             )
                             if not subs:
                                 raise RuntimeError('该分P没有可用字幕')
-
                             sub_url = subs[0].get('subtitle_url') or ''
                             if sub_url.startswith('//'):
                                 sub_url = 'https:' + sub_url
                             if not sub_url.startswith('https://'):
                                 raise RuntimeError('字幕地址无效')
-
                             sr = session.get(
                                 sub_url, timeout=(10, 25)
                             )
                             sr.raise_for_status()
                             sj = sr.json()
                             lines = []
-
                             for i, item in enumerate(
                                 sj.get('body') or [], 1
                             ):
@@ -1060,7 +1102,6 @@ class HomeScreen(Screen):
                                         whole % 60,
                                         ms
                                     )
-
                                 lines.extend([
                                     str(i),
                                     stamp(item.get('from'))
@@ -1069,7 +1110,6 @@ class HomeScreen(Screen):
                                     safe_text(item.get('content'), 1000),
                                     ''
                                 ])
-
                             dest = out_dir / (
                                 bvid + '_P%d.srt' % page_no
                             )
@@ -1089,12 +1129,10 @@ class HomeScreen(Screen):
                                     else ''
                                 )
                             )
-
                         set_status(
                             'P%d 完成' % page_no,
                             (order + 1) * 100.0 / len(pages)
                         )
-
                     except Exception as exc:
                         failures.append(
                             'P%d：%s' % (
@@ -1106,7 +1144,6 @@ class HomeScreen(Screen):
                                 page_no, safe_text(exc, 150)
                             )
                         )
-
                 if cancel.is_set():
                     set_status(
                         '任务已取消；已完成 %d 项，失败 %d 项'
@@ -1124,12 +1161,9 @@ class HomeScreen(Screen):
                         % len(successes),
                         100
                     )
-
                 summary = '完成 %d 项' % len(successes)
-
                 if failures:
                     summary += '\n失败：\n' + '\n'.join(failures[:8])
-
                 if successes:
                     summary += (
                         '\n应用私有目录：' + str(out_dir)
@@ -1139,12 +1173,9 @@ class HomeScreen(Screen):
                 @mainthread
                 def show_summary():
                     self.result_label.text = summary[:1200]
-
                 show_summary()
-
             except Exception as exc:
                 set_status('任务异常：' + safe_text(exc, 180))
-
             finally:
                 @mainthread
                 def finish():
@@ -1152,9 +1183,12 @@ class HomeScreen(Screen):
                     self.download_btn.disabled = False
                     self.parse_btn.disabled = False
                     self.cancel_btn.disabled = True
-
+                    try:
+                        self.app_ref.downloaded.refresh_files()
+                        self.app_ref.profile.refresh_profile()
+                    except Exception:
+                        pass
                 finish()
-
         threading.Thread(
             target=worker, daemon=True, name='bili-download'
         ).start()
@@ -1175,9 +1209,7 @@ class HomeScreen(Screen):
             content=ui_label(message, 13, INK, 100),
             size_hint=(.9, .4)
         ).open()
-        # ---------------- HTML <-> Python local API ----------------
-# HTML 前端通过 Android WebAppBridge.call(JSON) 调用此本地接口。
-# 本地接口只监听 127.0.0.1，不需要外部服务器。
+
 
 _BRIDGE_TASKS = {}
 _BRIDGE_TASKS_LOCK = threading.Lock()
@@ -1193,7 +1225,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         raw = json.dumps(
             payload, ensure_ascii=False
         ).encode('utf-8')
-
         self.send_response(status)
         self.send_header(
             'Content-Type', 'application/json; charset=utf-8'
@@ -1223,19 +1254,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             )
             action = str(data.get('action') or '')
             app = self.app_ref
-
             if app is None:
                 return self._reply(
                     {'ok': False, 'error': '应用尚未启动'}, 503
                 )
-
             if action == 'ping':
                 return self._reply({
                     'ok': True,
                     'app': 'bilibilidl',
                     'bridge': 1
                 })
-
             if action == 'account':
                 profile = (
                     app.profile_data
@@ -1247,51 +1275,42 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     'logged_in': bool(app.get_cookie()),
                     'profile': profile
                 })
-
             if action == 'parse':
                 source = str(
                     data.get('url') or data.get('input') or ''
                 ).strip()
-
                 if not source:
                     return self._reply({
                         'ok': False,
                         'error': '请输入 BV / AV / 视频链接'
                     })
-
                 cookie = app.get_cookie() or ''
                 session = new_session(cookie)
                 info = get_video_info(session, source)
-
                 pages = info.get('pages') or [{
                     'page': 1,
                     'cid': info.get('cid'),
                     'part': info.get('title', 'P1'),
                     'duration': info.get('duration', 0)
                 }]
-
                 play = get_play_info(session, info, cookie)
                 payload = play.get('data') or {}
                 ids = payload.get('accept_quality') or []
                 desc = payload.get('accept_description') or []
                 qualities = []
-
                 for i, q in enumerate(ids):
                     try:
                         qn = int(q)
                     except Exception:
                         continue
-
                     if not cookie and qn >= 80:
                         continue
-
                     qualities.append({
                         'qn': qn,
                         'label': str(
                             desc[i] if i < len(desc) else qn
                         )
                     })
-
                 clean_pages = []
                 for page in pages:
                     clean_pages.append({
@@ -1300,11 +1319,9 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                         'part': str(page.get('part') or ''),
                         'duration': page.get('duration') or 0
                     })
-
                 app._bridge_last_info = dict(info)
                 app._bridge_last_pages = clean_pages
                 app._bridge_last_qualities = qualities
-
                 return self._reply({
                     'ok': True,
                     'video': {
@@ -1318,21 +1335,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     'pages': clean_pages,
                     'qualities': qualities
                 })
-
             if action == 'start_download':
                 info = getattr(app, '_bridge_last_info', None)
                 pages = getattr(app, '_bridge_last_pages', [])
-
                 if not info or not pages:
                     return self._reply({
                         'ok': False,
                         'error': '请先解析视频'
                     })
-
                 task_id = str(int(time.time() * 1000))
                 selected = data.get('pages', 'all')
-
-                # 支持：全部分P、单个分P、多个分P编号列表
                 if selected == 'all' or selected is None:
                     chosen = list(pages)
                 elif isinstance(selected, list):
@@ -1343,7 +1355,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                             'ok': False,
                             'error': '分P编号格式不正确'
                         })
-
                     chosen = [
                         p for p in pages
                         if int(p.get('page') or 1) in page_numbers
@@ -1356,18 +1367,15 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                             'ok': False,
                             'error': '分P编号不正确'
                         })
-
                     chosen = [
                         p for p in pages
                         if int(p.get('page') or 1) == page_num
                     ]
-
                 if not chosen:
                     return self._reply({
                         'ok': False,
                         'error': '没有找到所选分P'
                     })
-
                 try:
                     qn = int(
                         data.get('quality')
@@ -1377,21 +1385,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     )
                 except Exception:
                     qn = 0
-
                 mode = str(data.get('mode') or 'video').strip().lower()
                 allowed_modes = {'video', 'cover', 'danmaku', 'subtitle'}
-
                 if mode not in allowed_modes:
                     return self._reply({
                         'ok': False,
                         'error': '不支持的下载类型'
                     })
-
                 out_dir = Path(app.user_data_dir) / 'downloads'
                 out_dir.mkdir(parents=True, exist_ok=True)
-
                 cancel = threading.Event()
-
                 with _BRIDGE_TASKS_LOCK:
                     _BRIDGE_TASKS[task_id] = {
                         'state': 'running',
@@ -1404,23 +1407,18 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
                 def worker():
                     failures = []
-
                     try:
                         total = max(1, len(chosen))
-
                         for idx, page in enumerate(chosen):
                             if cancel.is_set():
                                 break
-
                             page_no = int(page.get('page') or idx + 1)
                             cid = page.get('cid')
-
                             if not cid:
                                 failures.append(
                                     'P%d：缺少 cid' % page_no
                                 )
                                 continue
-
                             part_info = dict(info)
                             part_info['cid'] = cid
                             part_info['page'] = page_no
@@ -1433,7 +1431,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                         + (done / size if size else 0)
                                     ) / total * 100
                                 )
-
                                 with _BRIDGE_TASKS_LOCK:
                                     task = _BRIDGE_TASKS.get(task_id)
                                     if task:
@@ -1442,11 +1439,9 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                             message='P%d 下载中'
                                             % current_page
                                         )
-
                             try:
                                 cookie = app.get_cookie() or ''
                                 dest = None
-
                                 if mode == 'video':
                                     result = download_video(
                                         part_info,
@@ -1458,15 +1453,12 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                         log=lambda msg: None
                                     )
                                     dest = _verified_file(result)
-
                                 elif mode == 'cover':
                                     pic = str(info.get('pic') or '')
                                     if pic.startswith('//'):
                                         pic = 'https:' + pic
-
                                     if not pic.startswith(('https://', 'http://')):
                                         raise RuntimeError('视频封面地址无效')
-
                                     resp = requests.get(
                                         pic,
                                         timeout=(10, 30),
@@ -1476,10 +1468,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                     )
                                     resp.raise_for_status()
                                     raw = resp.content
-
                                     if not raw or len(raw) > 20 * 1024 * 1024:
                                         raise RuntimeError('封面为空或文件过大')
-
                                     if raw.startswith((b'GIF87a', b'GIF89a')):
                                         ext = 'gif'
                                     elif raw.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -1490,14 +1480,12 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                         ext = 'webp'
                                     else:
                                         raise RuntimeError('无法识别封面格式')
-
                                     dest = out_dir / (
                                         str(info.get('bvid') or info.get('aid') or 'video')
                                         + '_cover.' + ext
                                     )
                                     dest.write_bytes(raw)
                                     dest = _verified_file(dest)
-
                                 elif mode == 'danmaku':
                                     session = new_session(cookie)
                                     resp = session.get(
@@ -1506,26 +1494,21 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                     )
                                     resp.raise_for_status()
                                     raw = resp.content
-
                                     if not raw or b'<i' not in raw[:1000]:
                                         raise RuntimeError('该分P没有可用弹幕 XML')
-
                                     dest = out_dir / (
                                         str(info.get('bvid') or info.get('aid') or 'video')
                                         + '_P%d_danmaku.xml' % page_no
                                     )
                                     dest.write_bytes(raw)
                                     dest = _verified_file(dest)
-
                                 elif mode == 'subtitle':
                                     session = new_session(cookie)
                                     params = {'cid': cid}
-
                                     if info.get('bvid'):
                                         params['bvid'] = info['bvid']
                                     elif info.get('aid'):
                                         params['aid'] = info['aid']
-
                                     resp = session.get(
                                         'https://api.bilibili.com/x/player/v2',
                                         params=params,
@@ -1533,21 +1516,17 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                     )
                                     resp.raise_for_status()
                                     jdata = resp.json()
-
                                     subs = (
                                         ((jdata.get('data') or {}).get('subtitle') or {})
                                         .get('subtitles') or []
                                     )
                                     if not subs:
                                         raise RuntimeError('该分P没有可用字幕')
-
                                     sub_url = subs[0].get('subtitle_url') or ''
                                     if sub_url.startswith('//'):
                                         sub_url = 'https:' + sub_url
-
                                     if not sub_url.startswith('https://'):
                                         raise RuntimeError('字幕地址无效')
-
                                     sr = session.get(sub_url, timeout=(10, 25))
                                     sr.raise_for_status()
                                     subtitle_data = sr.json()
@@ -1563,7 +1542,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                             whole % 60,
                                             ms
                                         )
-
                                     for line_no, item in enumerate(
                                         subtitle_data.get('body') or [], 1
                                     ):
@@ -1575,10 +1553,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                             str(item.get('content') or ''),
                                             ''
                                         ])
-
                                     if not subtitle_lines:
                                         raise RuntimeError('字幕内容为空')
-
                                     dest = out_dir / (
                                         str(info.get('bvid') or info.get('aid') or 'video')
                                         + '_P%d.srt' % page_no
@@ -1588,36 +1564,24 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                         encoding='utf-8-sig'
                                     )
                                     dest = _verified_file(dest)
-
                                 public_uri = _export_to_public_downloads(dest)
-
                                 display_path = str(dest)
                                 if public_uri.startswith('content://'):
                                     display_path += ' | ' + public_uri
-
                                 with _BRIDGE_TASKS_LOCK:
                                     task = _BRIDGE_TASKS.get(task_id)
                                     if task:
                                         task['files'].append(display_path)
-
                             except Exception as exc:
                                 failures.append(
                                     'P%d：%s' % (page_no, safe_text(exc, 220))
                                 )
-
-                            except Exception as exc:
-                                failures.append(
-                                    'P%d：%s'
-                                    % (page_no, safe_text(exc, 220))
-                                )
-
                             with _BRIDGE_TASKS_LOCK:
                                 task = _BRIDGE_TASKS.get(task_id)
                                 if task:
                                     task['progress'] = int(
                                         (idx + 1) / total * 100
                                     )
-
                         with _BRIDGE_TASKS_LOCK:
                             task = _BRIDGE_TASKS.get(task_id)
                             if task:
@@ -1642,7 +1606,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                             'Download/bilibilidl'
                                         )
                                     )
-
                     except Exception as exc:
                         with _BRIDGE_TASKS_LOCK:
                             task = _BRIDGE_TASKS.get(task_id)
@@ -1652,57 +1615,45 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                                     message='下载失败',
                                     error=safe_text(exc, 500)
                                 )
-
                 threading.Thread(
                     target=worker,
                     daemon=True,
                     name='bili-html-download'
                 ).start()
-
                 return self._reply({
                     'ok': True,
                     'task_id': task_id
                 })
-
             if action == 'task_status':
                 task_id = str(data.get('task_id') or '')
-
                 with _BRIDGE_TASKS_LOCK:
                     task = _BRIDGE_TASKS.get(task_id)
-
                     if not task:
                         return self._reply({
                             'ok': False,
                             'error': '任务不存在'
                         })
-
                     result = {
                         k: v for k, v in task.items()
                         if k != 'cancel'
                     }
-
                 return self._reply({
                     'ok': True,
                     'task': result
                 })
-
             if action == 'cancel_download':
                 task_id = str(data.get('task_id') or '')
-
                 with _BRIDGE_TASKS_LOCK:
                     task = _BRIDGE_TASKS.get(task_id)
                     if task:
                         task['cancel'].set()
-
                 return self._reply({
                     'ok': bool(task),
                     'error': '' if task else '任务不存在'
                 })
-
             if action == 'history':
                 folder = Path(app.user_data_dir) / 'downloads'
                 files = []
-
                 if folder.exists():
                     try:
                         items = sorted(
@@ -1712,16 +1663,13 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                         )
                     except OSError:
                         items = []
-
                     for item in items:
                         try:
                             if not item.is_file():
                                 continue
-
                             stat = item.stat()
                             if stat.st_size <= 0:
                                 continue
-
                             files.append({
                                 'name': item.name,
                                 'path': str(item),
@@ -1730,17 +1678,14 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                             })
                         except OSError:
                             continue
-
                 return self._reply({
                     'ok': True,
                     'files': files[:500]
                 })
-
             return self._reply({
                 'ok': False,
                 'error': '未知操作：' + action
             })
-
         except Exception as exc:
             return self._reply({
                 'ok': False,
@@ -1757,13 +1702,11 @@ class _BridgeServer:
     def start(self):
         if self.server:
             return
-
         handler = type(
             'BiliDlBridgeHandler',
             (_BridgeHandler,),
             {'app_ref': self.app}
         )
-
         try:
             self.server = ThreadingHTTPServer(
                 ('127.0.0.1', 18765), handler
@@ -1787,121 +1730,94 @@ class _BridgeServer:
 
 
 class BiliDlApp(App):
+    """纯 Kivy 原生界面入口：不再加载 HTML/WebView，避免启动后闪退。"""
     def build(self):
-        # 前面的初始化代码……
-
+        self.title = APP_NAME
+        self.cookie_data = ''
+        self.profile_data = {}
+        self.cookie_file = Path(self.user_data_dir) / 'cookie_store.json'
+        self.sm = ScreenManager()
+        self.home = HomeScreen(self, name='home')
+        self.downloaded = DownloadedScreen(self, name='downloaded')
+        self.profile = ProfileScreen(self, name='profile')
+        self.sm.add_widget(self.home)
+        self.sm.add_widget(self.downloaded)
+        self.sm.add_widget(self.profile)
+        shell = BoxLayout(orientation='vertical', spacing=0)
+        shell.add_widget(self.sm)
+        nav = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(8), dp(5), dp(8), dp(5)], spacing=dp(6))
+        self.nav_buttons = {}
+        for key, label in [('home','⌂  首页'),('downloaded','▤  已下载'),('profile','◉  我的')]:
+            btn = PinkButton(text=label, bg=WHITE, fg=GRAY, size_hint_x=1, height=dp(54))
+            btn.bind(on_release=lambda _b, dest=key: self.navigate(dest))
+            self.nav_buttons[key]=btn
+            nav.add_widget(btn)
+        shell.add_widget(nav)
+        self.root_shell = shell
+        self.update_nav('home')
+        try:
+            self.load_cookie_local()
+        except Exception:
+            pass
+        # Java 视频合并器预加载失败不能阻断主界面启动。
         if platform == 'android':
             try:
                 preload_merger()
             except Exception:
                 pass
+        return self.root_shell
 
-            html_file = BASE_DIR / 'index.html'
-            splash_file = BASE_DIR / 'bilibilidl加载图.png'
+    def navigate(self, destination):
+        if destination not in ('home','downloaded','profile'):
+            return
+        self.sm.current = destination
+        if destination == 'downloaded':
+            self.downloaded.refresh_files()
+        elif destination == 'profile':
+            self.profile.refresh_profile()
+        self.update_nav(destination)
 
-            if html_file.is_file() and splash_file.is_file():
-                self._startup_view = FloatLayout()
-                self._startup_image = Image(
-                    source=str(splash_file),
-                    allow_stretch=True,
-                    keep_ratio=False,
-                    size_hint=(1, 1),
-                    pos_hint={'x': 0, 'y': 0}
-                )
-                self._startup_view.add_widget(
-                    self._startup_image
-                )
+    def update_nav(self, active):
+        for key, btn in getattr(self, 'nav_buttons', {}).items():
+            btn.bg = PINK if key == active else WHITE
+            btn.fg = WHITE if key == active else GRAY
 
-                Clock.schedule_once(
-                    lambda _dt: self.open_html_frontend(html_file),
-                    0.25
-                )
-                return self._startup_view
-
-            return self.sm
-
-        return self.sm
-
-def open_html_frontend(self, html_file):
-    try:
-        from jnius import autoclass
-        from android.runnable import run_on_ui_thread
-
-        PythonActivity = autoclass(
-            'org.kivy.android.PythonActivity'
-        )
-        Bridge = autoclass(
-            'org.bilibilidl.WebAppBridge'
-        )
-
-        activity = PythonActivity.mActivity
-        html_uri = Path(html_file).resolve().as_uri()
-        api_url = 'http://127.0.0.1:18765/api'
-
-        @run_on_ui_thread
-        def show_webview():
-            Bridge.open(activity, html_uri, api_url)
-
-        show_webview()
-
-    except Exception as exc:
-        message = (
-            'HTML 界面启动失败：'
-            + safe_text(exc, 300)
-        )
-        try:
-            self.home.result_label.text = message
-            self.root = self.sm
-        except Exception:
-            pass
-
-def get_cookie(self):
-    return self.cookie_data or ''
+    def get_cookie(self):
+        return self.cookie_data or ''
 
     @mainthread
     def save_cookie_local(self, cookie, profile):
         self.cookie_data = safe_text(cookie, 20000)
-        self.profile_data = (
-            profile if isinstance(profile, dict) else {}
-        )
-
+        self.profile_data = profile if isinstance(profile, dict) else {}
         try:
-            self.cookie_file.parent.mkdir(
-                parents=True, exist_ok=True
-            )
+            self.cookie_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cookie_file.with_suffix('.tmp')
-            tmp.write_text(
-                json.dumps({
-                    'cookie': self.cookie_data,
-                    'profile': self.profile_data
-                }, ensure_ascii=False),
-                encoding='utf-8'
-            )
+            tmp.write_text(json.dumps({
+                'cookie': self.cookie_data,
+                'profile': self.profile_data
+            }, ensure_ascii=False), encoding='utf-8')
             tmp.replace(self.cookie_file)
-
         except Exception as exc:
-            self.home.result_label.text = (
-                '登录成功，但本地保存 Cookie 失败：'
-                + safe_text(exc, 120)
-            )
-
-        self.home.refresh_account(self.profile_data)
+            try:
+                self.home.result_label.text = (
+                    '登录成功，但本地保存 Cookie 失败：' + safe_text(exc, 120)
+                )
+            except Exception:
+                pass
+        try:
+            self.home.refresh_account(self.profile_data)
+        except Exception:
+            pass
 
     def load_cookie_local(self):
         try:
             if self.cookie_file.is_file():
-                data = json.loads(
-                    self.cookie_file.read_text(encoding='utf-8')
-                )
-                self.cookie_data = safe_text(
-                    data.get('cookie') or '', 20000
-                )
+                data = json.loads(self.cookie_file.read_text(encoding='utf-8'))
+                self.cookie_data = safe_text(data.get('cookie') or '', 20000)
                 profile = data.get('profile')
-                self.profile_data = (
-                    profile if isinstance(profile, dict) else {}
-                )
-                self.home.refresh_account(self.profile_data)
-
+                self.profile_data = profile if isinstance(profile, dict) else {}
+                if hasattr(self, 'home'):
+                    self.home.refresh_account(self.profile_data)
         except Exception:
             self.cookie_data = ''
             self.profile_data = {}
@@ -1910,12 +1826,6 @@ def get_cookie(self):
         return True
 
     def on_stop(self):
-        try:
-            if hasattr(self, '_bridge_server'):
-                self._bridge_server.stop()
-        except Exception:
-            pass
-
         try:
             if hasattr(self, 'home') and self.home.busy:
                 self.home.cancel_event.set()
