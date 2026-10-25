@@ -192,12 +192,14 @@ class PinkButton(Button):
         self.background_normal = ''
         self.background_down = ''
         self.background_color = (0, 0, 0, 0)
-        self.color = fg
         self.font_name = FONT_BOLD_NAME
         self.font_size = dp(14)
         self.bold = True
+        self._bg = tuple(bg)
+        self._fg = tuple(fg)
+        self.color = self._fg
         with self.canvas.before:
-            Color(*bg)
+            self._bg_color = Color(*self._bg)
             self._rect = RoundedRectangle(
                 pos=self.pos, size=self.size, radius=[dp(18)]
             )
@@ -206,6 +208,27 @@ class PinkButton(Button):
     def _sync(self, *_):
         self._rect.pos = self.pos
         self._rect.size = self.size
+
+    @property
+    def bg(self):
+        return self._bg
+
+    @bg.setter
+    def bg(self, value):
+        self._bg = tuple(value)
+        try:
+            self._bg_color.rgba = self._bg
+        except Exception:
+            pass
+
+    @property
+    def fg(self):
+        return self._fg
+
+    @fg.setter
+    def fg(self, value):
+        self._fg = tuple(value)
+        self.color = self._fg
 
 
 class PinkInput(TextInput):
@@ -1163,7 +1186,7 @@ class HomeScreen(Screen):
         # The preview area is also the anchor for the in-page WebView player.
         self.cover_preview = Image(size_hint_y=None, height=dp(202), allow_stretch=True, keep_ratio=True)
         video_card.add_widget(self.cover_preview)
-        self.player_hint = ui_label('解析后可在此区域直接播放视频', 11, GRAY, 22)
+        self.player_hint = ui_label('解析后点「在线播放」可全屏观看（应用内）', 11, GRAY, 22)
         video_card.add_widget(self.player_hint)
         self._player_expanded = False
         self.title_label = ui_label('解析后显示视频标题', 18, INK, 54, bold=True)
@@ -1171,7 +1194,7 @@ class HomeScreen(Screen):
         self.owner_label = ui_label('UP 主 · 播放信息 · 视频时长', 12, GRAY, 28)
         video_card.add_widget(self.owner_label)
         content.add_widget(video_card)
-        self.play_btn = PinkButton(text='在线播放（B站播放器）  ▶', bg=PALE, fg=PINK,
+        self.play_btn = PinkButton(text='在线播放（应用内全屏）  ▶', bg=PALE, fg=PINK,
                                    size_hint_y=None, height=dp(48), disabled=True)
         self.play_btn.bind(on_release=self.open_online_player)
         content.add_widget(self.play_btn)
@@ -1311,10 +1334,17 @@ class HomeScreen(Screen):
                             self.refresh_account({})
                         clear_expired_login()
                 quality_names = {
-                    6: '240P 极速', 16: '360P 流畅', 32: '480P 清晰',
-                    64: '720P 高清', 80: '1080P 高清', 112: '1080P+',
-                    116: '1080P60', 120: '4K 超清', 125: 'HDR',
-                    126: '杜比视界', 127: '8K 超高清'
+                    127: "8K 超高清(大会员)",
+                    120: "4K 超清(大会员)",
+                    125: "HDR真彩(大会员)",
+                    116: "1080P 60帧(大会员)",
+                    112: "1080P+(大会员)",
+                    80:  "1080P 高清",
+                    74:  "720P 60帧",
+                    64:  "720P 高清",
+                    32:  "480P 清晰",
+                    16:  "360P 流畅",
+                    6:   "240P 极速"
                 }
 
                 def parse_quality_list(play_data, has_cookie):
@@ -1456,12 +1486,11 @@ class HomeScreen(Screen):
         self.auto_play_btn.fg = WHITE if self.auto_play_after_parse else INK
 
     def open_online_player(self, *_):
-        """Show the official Bilibili player inline over the preview area; expand on demand.
+        """Embed official Bilibili player in a full-screen Android WebView.
 
-        Critical: if anything fails after the native FrameLayout is added to the
-        Activity, we MUST remove it; otherwise a transparent overlay permanently
-        intercepts all touches (buttons become unclickable) and WebView teardown
-        can trigger Looper/MessageQueue NPEs.
+        All native WebView create/destroy work is posted to the Android UI
+        thread via runOnUiThread to avoid Looper/MessageQueue NPEs.
+        On failure falls back to external browser / Bilibili app.
         """
         info = self.info or {}
         pages = self.pages or []
@@ -1475,144 +1504,246 @@ class HomeScreen(Screen):
             self.result_label.text = '当前分P缺少 CID，暂时无法打开播放器。'
             return
         url = 'https://player.bilibili.com/player.html?' + urllib.parse.urlencode({
-            'bvid': str(info['bvid']), 'cid': str(cid), 'danmaku': '1',
-            'autoplay': '1'
+            'bvid': str(info['bvid']),
+            'cid': str(cid),
+            'danmaku': '1',
+            'autoplay': '1',
+            'high_quality': '1',
         })
-        if platform != 'android':
-            self.result_label.text = '应用内 WebView 播放器仅在 Android APK 中可用。'
-            return
+        external_url = 'https://www.bilibili.com/video/%s' % info['bvid']
 
-        # Always start from a clean slate so a previous failed open cannot block UI.
+        # Tear down any previous instance first (also UI-thread safe).
         self.close_online_player()
 
-        overlay = None
-        root = None
-        web = None
+        if platform != 'android':
+            try:
+                import webbrowser
+                webbrowser.open(url)
+                self.result_label.text = '非 Android 环境，已用系统浏览器打开。'
+            except Exception as exc:
+                self.result_label.text = '无法打开：' + safe_text(exc, 120)
+            return
+
         try:
             from jnius import autoclass, PythonJavaClass, java_method
-            from kivy.core.window import Window
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            WebView = autoclass('android.webkit.WebView')
-            WebViewClient = autoclass('android.webkit.WebViewClient')
-            WebChromeClient = autoclass('android.webkit.WebChromeClient')
-            CookieManager = autoclass('android.webkit.CookieManager')
-            FrameLayout = autoclass('android.widget.FrameLayout')
-            NativeButton = autoclass('android.widget.Button')
-            Gravity = autoclass('android.view.Gravity')
-            ViewGroup = autoclass('android.view.ViewGroup')
-            LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
-            FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
-            Color = autoclass('android.graphics.Color')
             activity = PythonActivity.mActivity
             if activity is None:
-                self.result_label.text = 'Activity 尚未就绪，请稍后再试播放。'
+                self.result_label.text = 'Activity 未就绪，请稍后再试。'
                 return
 
-            web = WebView(activity)
-            settings = web.getSettings()
-            settings.setJavaScriptEnabled(True)
-            settings.setDomStorageEnabled(True)
-            settings.setMediaPlaybackRequiresUserGesture(False)
-            settings.setSupportZoom(False)
-            settings.setLoadWithOverviewMode(True)
-            settings.setUseWideViewPort(True)
-            try:
-                # Reduce some surface/hardware path crashes on older devices.
-                web.setLayerType(web.LAYER_TYPE_HARDWARE, None)
-            except Exception:
-                pass
-            web.setBackgroundColor(Color.BLACK)
-            web.setWebChromeClient(WebChromeClient())
-            web.setWebViewClient(WebViewClient())
-
             cookie = self.app_ref.get_cookie() or ''
-            try:
-                cm = CookieManager.getInstance()
-                cm.setAcceptCookie(True)
-                if cookie:
-                    for pair in cookie.split(';'):
-                        pair = pair.strip()
-                        if '=' in pair:
-                            cm.setCookie('https://www.bilibili.com/', pair)
-                            cm.setCookie('https://player.bilibili.com/', pair)
-                try:
-                    cm.flush()
-                except Exception:
-                    pass
-            except Exception:
-                # Cookie injection failure should not block playback of public videos.
-                pass
-
-            root = activity.findViewById(autoclass('android.R$id').content)
-            if root is None:
-                raise RuntimeError('无法获取 Activity content 根视图')
-            overlay = FrameLayout(activity)
-            overlay.setBackgroundColor(Color.TRANSPARENT)
-            # Keep the overlay container full-sized, but the WebView itself is placed
-            # exactly over the Kivy preview widget so it does not cover labels/buttons.
-            overlay_params = LayoutParams(-1, -1)
-            root.addView(overlay, overlay_params)
-
-            self._online_webview = web
-            self._online_overlay = overlay
-            self._online_root = root
-            self._player_native = {
-                'FrameParams': FrameParams, 'Gravity': Gravity,
-                'NativeButton': NativeButton, 'Color': Color,
-                'Window': Window, 'ViewGroup': ViewGroup,
-            }
-            self._player_fullscreen = False
-            self._player_web_params = None
-            overlay.addView(web)
-
             screen_ref = self
 
-            class ToggleListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
+            class OpenPlayerRunnable(PythonJavaClass):
+                __javainterfaces__ = ['java/lang/Runnable']
                 __javacontext__ = 'app'
 
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    Clock.schedule_once(lambda _dt: screen_ref.toggle_player_size(), 0)
+                @java_method('()V')
+                def run(self):
+                    try:
+                        WebView = autoclass('android.webkit.WebView')
+                        WebViewClient = autoclass('android.webkit.WebViewClient')
+                        WebChromeClient = autoclass('android.webkit.WebChromeClient')
+                        CookieManager = autoclass('android.webkit.CookieManager')
+                        FrameLayout = autoclass('android.widget.FrameLayout')
+                        NativeButton = autoclass('android.widget.Button')
+                        Gravity = autoclass('android.view.Gravity')
+                        LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
+                        FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
+                        Color = autoclass('android.graphics.Color')
+                        R = autoclass('android.R$id')
 
-            class CloseListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
-                __javacontext__ = 'app'
+                        root = activity.findViewById(R.content)
+                        if root is None:
+                            raise RuntimeError('无法获取 content 根视图')
 
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    Clock.schedule_once(lambda _dt: screen_ref.close_online_player(), 0)
+                        overlay = FrameLayout(activity)
+                        overlay.setBackgroundColor(Color.BLACK)
+                        root.addView(overlay, LayoutParams(-1, -1))
 
-            expand_btn = NativeButton(activity)
-            expand_btn.setText('放大 ⛶')
-            expand_btn.setTextColor(Color.WHITE)
-            expand_btn.setBackgroundColor(Color.argb(225, 210, 45, 95))
-            close_btn = NativeButton(activity)
-            close_btn.setText('关闭 ×')
-            close_btn.setTextColor(Color.WHITE)
-            close_btn.setBackgroundColor(Color.argb(225, 70, 70, 70))
-            density = float(activity.getResources().getDisplayMetrics().density)
-            ep = FrameParams(-2, -2)
-            ep.gravity = Gravity.TOP | Gravity.RIGHT
-            ep.topMargin = int(dp(4) * density)
-            cp = FrameParams(-2, -2)
-            cp.gravity = Gravity.TOP | Gravity.LEFT
-            cp.topMargin = int(dp(4) * density)
-            overlay.addView(expand_btn, ep)
-            overlay.addView(close_btn, cp)
-            self._online_expand_listener = ToggleListener()
-            self._online_close_listener = CloseListener()
-            expand_btn.setOnClickListener(self._online_expand_listener)
-            close_btn.setOnClickListener(self._online_close_listener)
-            self._player_expand_button = expand_btn
-            self._player_close_button = close_btn
-            self._position_inline_player()
-            web.loadUrl(url)
-            self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
-            self.result_label.text = '播放器已显示在视频预览区域，不会覆盖标题和下载设置。'
+                        web = WebView(activity)
+                        settings = web.getSettings()
+                        settings.setJavaScriptEnabled(True)
+                        settings.setDomStorageEnabled(True)
+                        settings.setMediaPlaybackRequiresUserGesture(False)
+                        settings.setSupportZoom(True)
+                        settings.setBuiltInZoomControls(False)
+                        settings.setDisplayZoomControls(False)
+                        settings.setLoadWithOverviewMode(True)
+                        settings.setUseWideViewPort(True)
+                        try:
+                            web.setLayerType(2, None)  # HARDWARE
+                        except Exception:
+                            pass
+                        web.setBackgroundColor(Color.BLACK)
+                        web.setWebChromeClient(WebChromeClient())
+                        web.setWebViewClient(WebViewClient())
+
+                        try:
+                            cm = CookieManager.getInstance()
+                            cm.setAcceptCookie(True)
+                            try:
+                                cm.setAcceptThirdPartyCookies(web, True)
+                            except Exception:
+                                pass
+                            if cookie:
+                                for pair in cookie.split(';'):
+                                    pair = pair.strip()
+                                    if '=' in pair:
+                                        cm.setCookie('https://www.bilibili.com/', pair)
+                                        cm.setCookie('https://player.bilibili.com/', pair)
+                            try:
+                                cm.flush()
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                        overlay.addView(web, LayoutParams(-1, -1))
+
+                        close_btn = NativeButton(activity)
+                        close_btn.setText('关闭播放 ×')
+                        close_btn.setTextColor(Color.WHITE)
+                        close_btn.setBackgroundColor(Color.argb(220, 40, 40, 40))
+                        density = float(activity.getResources().getDisplayMetrics().density)
+                        cp = FrameParams(-2, -2)
+                        cp.gravity = Gravity.TOP | Gravity.RIGHT
+                        cp.topMargin = int(12 * density)
+                        cp.rightMargin = int(12 * density)
+                        overlay.addView(close_btn, cp)
+
+                        class CloseListener(PythonJavaClass):
+                            __javainterfaces__ = ['android/view/View$OnClickListener']
+                            __javacontext__ = 'app'
+
+                            @java_method('(Landroid/view/View;)V')
+                            def onClick(self, view):
+                                Clock.schedule_once(
+                                    lambda _dt: screen_ref.close_online_player(), 0
+                                )
+
+                        listener = CloseListener()
+                        close_btn.setOnClickListener(listener)
+
+                        screen_ref._online_webview = web
+                        screen_ref._online_overlay = overlay
+                        screen_ref._online_root = root
+                        screen_ref._online_close_listener = listener
+                        screen_ref._player_close_button = close_btn
+
+                        web.loadUrl(url)
+                        Clock.schedule_once(
+                            lambda _dt: setattr(
+                                screen_ref.player_hint,
+                                'text',
+                                '全屏播放中，点右上角「关闭播放」返回。'
+                            ),
+                            0,
+                        )
+                        Clock.schedule_once(
+                            lambda _dt: setattr(
+                                screen_ref.result_label,
+                                'text',
+                                '已打开应用内 B 站播放器（全屏）。'
+                            ),
+                            0,
+                        )
+                    except Exception as exc:
+                        # Clean partial UI on the same UI thread, then fall back.
+                        try:
+                            screen_ref.close_online_player()
+                        except Exception:
+                            pass
+                        msg = safe_text(exc, 140)
+                        Clock.schedule_once(
+                            lambda _dt: screen_ref._fallback_external_player(
+                                external_url, msg
+                            ),
+                            0,
+                        )
+
+            activity.runOnUiThread(OpenPlayerRunnable())
         except Exception as exc:
-            # Any failure after addView MUST clean the overlay, otherwise the UI
-            # becomes permanently unresponsive and subsequent destroys can NPE.
+            self._fallback_external_player(external_url, safe_text(exc, 140))
+
+    def _fallback_external_player(self, url, reason=''):
+        """When in-app WebView fails, open Bilibili App or system browser."""
+        try:
+            if platform == 'android':
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                activity = PythonActivity.mActivity
+                bvid = ''
+                try:
+                    bvid = str((self.info or {}).get('bvid') or '')
+                except Exception:
+                    pass
+                launched = False
+                if activity is not None and bvid:
+                    try:
+                        intent = Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse('bilibili://video/' + bvid)
+                        )
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if intent.resolveActivity(activity.getPackageManager()) is not None:
+                            activity.startActivity(intent)
+                            launched = True
+                    except Exception:
+                        launched = False
+                if not launched and activity is not None:
+                    intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(intent)
+                    launched = True
+                if launched:
+                    self.result_label.text = (
+                        '应用内播放失败，已改用外部打开。'
+                        + ((' 原因：' + reason) if reason else '')
+                    )
+                    self.player_hint.text = '已交给 B 站 App / 浏览器播放'
+                    return
+            import webbrowser
+            webbrowser.open(url)
+            self.result_label.text = '已用系统浏览器打开播放页。'
+        except Exception as exc:
+            self.result_label.text = (
+                '播放失败：' + (reason or safe_text(exc, 120))
+            )
+
+    def _position_inline_player(self):
+        return
+
+    def toggle_player_size(self, *_):
+        return
+
+    def close_online_player(self, *_):
+        """Safely remove full-screen WebView on the Android UI thread."""
+        web = getattr(self, '_online_webview', None)
+        overlay = getattr(self, '_online_overlay', None)
+        root = getattr(self, '_online_root', None)
+        # Drop Python refs immediately so concurrent open cannot reuse them.
+        self._online_webview = None
+        self._online_overlay = None
+        self._online_root = None
+        self._online_close_listener = None
+        self._online_expand_listener = None
+        self._player_expand_button = None
+        self._player_close_button = None
+        self._player_native = None
+        self._player_fullscreen = False
+
+        if web is None and overlay is None:
+            try:
+                self.player_hint.text = '解析后可点「在线播放」全屏观看'
+            except Exception:
+                pass
+            return
+
+        def _do_destroy():
             try:
                 if web is not None:
                     try:
@@ -1621,6 +1752,12 @@ class HomeScreen(Screen):
                         pass
                     try:
                         web.loadUrl('about:blank')
+                    except Exception:
+                        pass
+                    try:
+                        parent = web.getParent()
+                        if parent is not None:
+                            parent.removeView(web)
                     except Exception:
                         pass
                     try:
@@ -1634,111 +1771,33 @@ class HomeScreen(Screen):
                         pass
             except Exception:
                 pass
-            self._online_webview = None
-            self._online_overlay = None
-            self._online_root = None
-            self._online_close_listener = None
-            self._online_expand_listener = None
-            self._player_expand_button = None
-            self._player_close_button = None
-            self._player_native = None
-            self._player_fullscreen = False
-            self.result_label.text = '应用内播放器启动失败：' + safe_text(exc, 160)
 
-    def _position_inline_player(self):
-        """Position the native WebView over the preview widget using Android pixels."""
-        if not getattr(self, '_online_webview', None) or getattr(self, '_player_fullscreen', False):
-            return
         try:
-            from kivy.core.window import Window
-            from kivy.metrics import Metrics
-            FrameParams = self._player_native['FrameParams']
-            density = float(Metrics.density or 1.0)
-            x, y = self.cover_preview.to_window(0, 0)
-            width = max(dp(220), self.cover_preview.width)
-            height = max(dp(150), self.cover_preview.height)
-            params = FrameParams(int(width * density), int(height * density))
-            params.leftMargin = int(x * density)
-            params.topMargin = int((Window.height - y - height) * density)
-            self._online_webview.setLayoutParams(params)
-            self._player_web_params = params
-        except Exception:
-            pass
+            if platform == 'android':
+                from jnius import autoclass, PythonJavaClass, java_method
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                activity = PythonActivity.mActivity
+                if activity is not None:
+                    class DestroyRunnable(PythonJavaClass):
+                        __javainterfaces__ = ['java/lang/Runnable']
+                        __javacontext__ = 'app'
 
-    def toggle_player_size(self, *_):
-        if not getattr(self, '_online_webview', None):
-            return
-        try:
-            FrameParams = self._player_native['FrameParams']
-            from kivy.metrics import Metrics
-            density = float(Metrics.density or 1.0)
-            self._player_fullscreen = not self._player_fullscreen
-            if self._player_fullscreen:
-                params = FrameParams(-1, -1)
-                self._player_expand_button.setText('缩小 ⤢')
-                self.player_hint.text = '全屏播放中；点击“缩小”返回解析页面。'
+                        @java_method('()V')
+                        def run(self):
+                            _do_destroy()
+
+                    activity.runOnUiThread(DestroyRunnable())
+                else:
+                    _do_destroy()
             else:
-                x, y = self.cover_preview.to_window(0, 0)
-                params = FrameParams(int(self.cover_preview.width * density), int(self.cover_preview.height * density))
-                params.leftMargin = int(x * density)
-                params.topMargin = int((self._player_native['Window'].height - y - self.cover_preview.height) * density)
-                self._player_expand_button.setText('放大 ⛶')
-                self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
-            self._online_webview.setLayoutParams(params)
-        except Exception as exc:
-            self.result_label.text = '切换播放器大小失败：' + safe_text(exc, 120)
-
-    def close_online_player(self, *_):
-        """Remove the native WebView overlay safely.
-
-        Order matters: stop loading -> blank page -> remove from parent -> destroy.
-        Doing destroy while still attached, or from a half-torn-down state, is a
-        frequent source of android.os.Looper / MessageQueue null-reference crashes.
-        """
-        web = getattr(self, '_online_webview', None)
-        overlay = getattr(self, '_online_overlay', None)
-        root = getattr(self, '_online_root', None)
-        # Clear Python refs first so concurrent autoplay/open cannot re-use a
-        # half-destroyed object.
-        self._online_webview = None
-        self._online_overlay = None
-        self._online_root = None
-        self._online_close_listener = None
-        self._online_expand_listener = None
-        self._player_expand_button = None
-        self._player_close_button = None
-        self._player_native = None
-        self._player_fullscreen = False
-        try:
-            if web is not None:
-                try:
-                    web.stopLoading()
-                except Exception:
-                    pass
-                try:
-                    web.loadUrl('about:blank')
-                except Exception:
-                    pass
-                try:
-                    # Detach before destroy to avoid MessageQueue races.
-                    parent = web.getParent()
-                    if parent is not None:
-                        parent.removeView(web)
-                except Exception:
-                    pass
-                try:
-                    web.destroy()
-                except Exception:
-                    pass
-            if overlay is not None and root is not None:
-                try:
-                    root.removeView(overlay)
-                except Exception:
-                    pass
+                _do_destroy()
         except Exception:
-            pass
+            try:
+                _do_destroy()
+            except Exception:
+                pass
         try:
-            self.player_hint.text = '解析后可在此区域直接播放视频'
+            self.player_hint.text = '解析后可点「在线播放」全屏观看'
         except Exception:
             pass
 
@@ -2273,7 +2332,19 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 ids = payload.get('accept_quality') or []
                 desc = payload.get('accept_description') or []
                 qualities_by_qn = {}
-                quality_names = {16:'360P 流畅',32:'480P 清晰',64:'720P 高清',80:'1080P 高清',112:'1080P+',116:'1080P60',120:'4K 超清',125:'HDR',126:'杜比视界',127:'8K 超高清'}
+                quality_names = {
+                    127: "8K 超高清(大会员)",
+                    120: "4K 超清(大会员)",
+                    125: "HDR真彩(大会员)",
+                    116: "1080P 60帧(大会员)",
+                    112: "1080P+(大会员)",
+                    80:  "1080P 高清",
+                    74:  "720P 60帧",
+                    64:  "720P 高清",
+                    32:  "480P 清晰",
+                    16:  "360P 流畅",
+                    6:   "240P 极速"
+                }
                 for i, q in enumerate(ids):
                     try:
                         qn = int(q)
@@ -2725,11 +2796,14 @@ class BiliSyncScreen(Screen):
         actions.add_widget(search_btn); actions.add_widget(sync_btn)
         root.add_widget(actions)
         tabs = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(5))
-        for key, title in [('history','历史记录'),('favorites','收藏夹'),('online','B站搜索')]:
+        self.tab_buttons = {}
+        for key, title in [('history', '历史记录'), ('favorites', '收藏夹'), ('online', 'B站搜索')]:
             b = PinkButton(text=title, bg=PALE, fg=PINK, font_size=dp(12))
             b.bind(on_release=lambda _b, m=key: self.set_mode(m))
+            self.tab_buttons[key] = b
             tabs.add_widget(b)
         root.add_widget(tabs)
+        self._refresh_tab_style()
         self.status = ui_label('同步后可离线搜索已缓存的历史和收藏。', 11, GRAY, 34)
         root.add_widget(self.status)
         sc = ScrollView(do_scroll_x=False, bar_width=dp(3))
@@ -2740,10 +2814,24 @@ class BiliSyncScreen(Screen):
         self.load_cache()
         self.render_items()
 
+    def _refresh_tab_style(self):
+        """Selected sync tab = pink bg + white text; others = pale + pink text."""
+        for key, btn in getattr(self, 'tab_buttons', {}).items():
+            active = (key == getattr(self, 'mode', 'history'))
+            btn.bg = PINK if active else PALE
+            btn.fg = WHITE if active else PINK
+            btn.font_size = dp(13 if active else 12)
+
     def set_mode(self, mode):
         self.mode = mode
-        self.search_input.hint_text = {'history':'搜索本地观看历史','favorites':'搜索本地收藏视频','online':'搜索 B 站全站公开视频'}.get(mode, '搜索视频')
-        self.render_items()
+        self.search_input.hint_text = {
+            'history': '搜索本地观看历史',
+            'favorites': '搜索本地收藏视频',
+            'online': '搜索 B 站全站公开视频'
+        }.get(mode, '搜索视频')
+        self._refresh_tab_style()
+        # Defer widget rebuild so tab/mode switch does not freeze the UI thread.
+        Clock.schedule_once(lambda _dt: self.render_items(), 0)
 
     def load_cache(self):
         try:
@@ -2966,7 +3054,7 @@ class BiliSyncScreen(Screen):
             return
         # Cap visible cards: creating hundreds of Kivy widgets on Android can
         # freeze the UI or trigger black screens / low-memory kills.
-        max_show = 80
+        max_show = 40
         shown = items[:max_show]
         for item in shown:
             card = Card(
@@ -3001,7 +3089,7 @@ class BiliSyncScreen(Screen):
         if len(items) > max_show:
             more = Card(bg=PALE, radius=dp(12), padding=dp(10), size_hint_y=None, height=dp(48))
             more.add_widget(ui_label(
-                '仅显示前 %d 条（共 %d 条）。可使用上方搜索缩小范围。'
+                '仅显示前 %d 条（共 %d 条），用搜索缩小范围可更快。'
                 % (max_show, len(items)),
                 11, GRAY, 28, halign='center'
             ))
@@ -3062,12 +3150,19 @@ class BiliDlApp(App):
             self.load_cookie_local()
         except Exception:
             pass
-        # Java 视频合并器预加载失败不能阻断主界面启动。
+        # Java 视频合并器必须尽量在 Android UI 线程预加载。
+        # build() 里先尝试一次；再延后一帧通过 Clock 再试，提高成功率。
         if platform == 'android':
             try:
                 preload_merger()
             except Exception:
                 pass
+            def _retry_preload(_dt):
+                try:
+                    preload_merger()
+                except Exception:
+                    pass
+            Clock.schedule_once(_retry_preload, 0.8)
         return self.root_shell
 
     def navigate(self, destination):
@@ -3077,18 +3172,34 @@ class BiliDlApp(App):
         if destination == 'downloaded':
             self.downloaded.refresh_files()
         elif destination == 'sync':
-            self.sync_screen.load_cache()
-            self.sync_screen.render_items()
+            # Defer heavy list rebuild so tab switch stays responsive.
+            # Only reload disk cache if we have never loaded this session.
+            def _sync_ui(_dt=0):
+                try:
+                    if not getattr(self.sync_screen, '_cache_loaded', False):
+                        self.sync_screen.load_cache()
+                        self.sync_screen._cache_loaded = True
+                    # Re-render only when list is empty (first visit) or mode changed flag.
+                    if not self.sync_screen.list_box.children:
+                        self.sync_screen.render_items()
+                except Exception:
+                    pass
+            Clock.schedule_once(_sync_ui, 0)
         elif destination == 'profile':
             self.profile.refresh_profile()
         self.update_nav(destination)
 
     def update_nav(self, active):
         for key, btn in getattr(self, 'nav_buttons', {}).items():
-            btn.bg = PINK if key == active else (1.0, 0.95, 0.97, 1)
-            btn.fg = WHITE if key == active else (0.38, 0.39, 0.44, 1)
+            if key == active:
+                btn.bg = PINK
+                btn.fg = WHITE
+                btn.font_size = dp(15)
+            else:
+                btn.bg = WHITE
+                btn.fg = (0.42, 0.45, 0.51, 1)
+                btn.font_size = dp(13)
             btn.bold = True
-            btn.font_size = dp(16 if key == active else 13)
             try:
                 btn.opacity = 1.0
             except Exception:
@@ -3167,6 +3278,11 @@ class BiliDlApp(App):
             self.profile_data = {}
 
     def on_pause(self):
+        try:
+            if hasattr(self, 'home') and self.home is not None:
+                self.home.close_online_player()
+        except Exception:
+            pass
         return True
 
     def on_stop(self):

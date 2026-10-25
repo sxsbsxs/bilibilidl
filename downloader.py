@@ -10,30 +10,78 @@ from bili_api import new_session, get_play_info, BiliAPIError
 UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
 
-# MediaMerger 的 Java 类必须在主线程加载一次并缓存。
+# MediaMerger 的 Java 类必须在 Android UI 主线程加载并缓存。
 # 后台线程里直接 autoclass 会用系统类加载器，找不到 App 自己的类，
 # 报 ClassNotFoundException。
 _MERGER = None
 _MERGER_ERR = None
 
+
 def preload_merger():
-    """在主线程调用（App 启动时）。"""
+    """优先在 Android UI 线程加载并缓存 MediaMerger 类。
+    Kivy build() 线程不一定等于 Android Looper 主线程，因此这里通过
+    activity.runOnUiThread 强制切到真正的 UI 线程；非 Android 环境则直接跳过。
+    """
     global _MERGER, _MERGER_ERR
     try:
+        from kivy.utils import platform
+        if platform != 'android':
+            _MERGER = None
+            _MERGER_ERR = None
+            return
         from jnius import autoclass
-        _MERGER = autoclass('org.bilibilidl.MediaMerger')
-        _MERGER_ERR = None
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        if activity is None:
+            # Activity 尚未就绪时先同步尝试一次，失败留给后续 UI 线程重试。
+            try:
+                _MERGER = autoclass('org.bilibilidl.MediaMerger')
+                _MERGER_ERR = None
+            except Exception as exc:
+                _MERGER = None
+                _MERGER_ERR = exc
+            return
+
+        from jnius import PythonJavaClass, java_method
+        class LoadMergerRunnable(PythonJavaClass):
+            __javainterfaces__ = ['java/lang/Runnable']
+            __javacontext__ = 'app'
+            @java_method('()V')
+            def run(self):
+                global _MERGER, _MERGER_ERR
+                try:
+                    _MERGER = autoclass('org.bilibilidl.MediaMerger')
+                    _MERGER_ERR = None
+                except Exception as exc:
+                    _MERGER = None
+                    _MERGER_ERR = exc
+
+        # 先同步尝试
+        try:
+            _MERGER = autoclass('org.bilibilidl.MediaMerger')
+            _MERGER_ERR = None
+        except Exception as exc:
+            _MERGER = None
+            _MERGER_ERR = exc
+        # 再post到UI线程兜底加载
+        try:
+            activity.runOnUiThread(LoadMergerRunnable())
+        except Exception:
+            pass
     except Exception as exc:
         _MERGER = None
         _MERGER_ERR = exc
 
+
 class DownloadError(RuntimeError):
     pass
+
 
 def safe_name(name):
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', '_',
                   name or 'bilibili_video').strip(' .')
     return (name or 'bilibili_video')[:120]
+
 
 def _headers(extra=None):
     h = {
@@ -46,6 +94,7 @@ def _headers(extra=None):
     if extra:
         h.update(extra)
     return h
+
 
 def _download_url(url, dest, session, progress=None, cancel=None):
     tmp = dest + '.part'
@@ -76,6 +125,7 @@ def _download_url(url, dest, session, progress=None, cancel=None):
     os.replace(tmp, dest)
     return dest
 
+
 def _try_urls(urls, dest, session, progress, cancel, log):
     """依次尝试主地址和备用地址，全部失败才报错，并列出每个地址的结果。"""
     errors = []
@@ -93,6 +143,7 @@ def _try_urls(urls, dest, session, progress, cancel, log):
             if log:
                 log('失败：' + msg)
     raise DownloadError('视频流下载失败：' + '；'.join(errors))
+
 
 def _fetch_data(session, info, qn):
     play = get_play_info(session, info)
@@ -114,15 +165,26 @@ def _fetch_data(session, info, qn):
             data = _api_json(session, API + '/x/player/playurl', params)
     return data
 
+
 def _merge(vpath, apath, final_path):
+    """合并音视频。禁止在下载后台线程里临时 autoclass。
+    若启动预加载失败，直接给出明确错误，避免 ClassNotFoundException
+    被吞成莫名其妙的合并失败。
+    """
     merger = _MERGER
     if merger is None:
-        # 兜底：如果启动时没有预加载成功，这里再试一次
-        from jnius import autoclass
-        merger = autoclass('org.bilibilidl.MediaMerger')
+        err = _MERGER_ERR
+        hint = (
+            'MediaMerger 未在 UI 线程预加载成功，无法合并 DASH 音视频。'
+            '请重启应用后再试。'
+        )
+        if err is not None:
+            hint += ' 原因：%s' % err
+        raise DownloadError(hint)
     ok = merger.merge(vpath, apath, final_path)
     if not ok:
         raise DownloadError('Android MediaMuxer 合并失败')
+
 
 def _download_once(info, cookie, quality, output_dir,
                    progress, cancel, log):
@@ -155,10 +217,12 @@ def _download_once(info, cookie, quality, output_dir,
     if video is None:
         video = videos[0]
     audio = audios[0]
+
     def stream_urls(s):
         first = s.get('baseUrl') or s.get('base_url')
         backup = s.get('backupUrl') or s.get('backup_url') or []
         return [first] + list(backup)
+
     vpath = os.path.join(output_dir, title + '.video.m4s')
     apath = os.path.join(output_dir, title + '.audio.m4s')
     try:
@@ -187,6 +251,7 @@ def _download_once(info, cookie, quality, output_dir,
                     os.remove(p)
                 except OSError:
                     pass
+
 
 def download_video(info, cookie, quality, output_dir,
                    progress=None, cancel=None, log=None):
