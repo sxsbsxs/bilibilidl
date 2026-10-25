@@ -1348,55 +1348,127 @@ class HomeScreen(Screen):
                 }
 
                 def parse_quality_list(play_data, has_cookie):
-                    """只收集该视频真实可播的清晰度，禁止用账号权限列表冒充片源。
+                    """以实际下发的可播放流为准，并校验流内真实宽高。
 
-                    优先级：
-                    1) support_formats —— B站标明本视频支持的格式
-                    2) dash.video 实际下发的流 id
-                    3) durl 一体流的 quality
-                    不用 accept_quality 单独建列表（它常含账号可申请但片源没有的档位）
+                    - 只收录 dash.video / durl 真实存在的轨
+                    - 读取每条流的 height/width；若与 qn 标称不符，
+                      在名称后追加「(实际xxP)」避免脏数据误导
+                    - support_formats 只用于起名，不新增档位
+                    - 完全忽略 accept_quality
                     """
                     result = {}
+                    label_map = {}
+                    # qn 标称高度下界（用于发现「标 1080 实 480」这类脏数据）
+                    nominal_min_h = {
+                        6: 200, 16: 300, 32: 400, 48: 600, 64: 600,
+                        74: 600, 80: 900, 100: 900, 112: 900, 116: 900,
+                        120: 1800, 125: 900, 127: 3500,
+                    }
 
-                    def add_qn(qn, desc=''):
+                    def height_to_tag(h):
                         try:
-                            qn = int(qn)
+                            h = int(h or 0)
                         except (TypeError, ValueError):
-                            return
-                        if qn <= 0 or qn in result:
-                            return
-                        desc = safe_text(desc, 50).strip()
-                        if not desc or desc.isdigit():
-                            desc = quality_names.get(qn, '画质 ' + str(qn))
-                        result[qn] = desc
+                            return ''
+                        if h <= 0:
+                            return ''
+                        if h >= 3500:
+                            return '8K'
+                        if h >= 1800:
+                            return '4K'
+                        if h >= 900:
+                            return '1080P'
+                        if h >= 600:
+                            return '720P'
+                        if h >= 400:
+                            return '480P'
+                        if h >= 300:
+                            return '360P'
+                        return '240P'
 
                     for fmt in (play_data.get('support_formats') or []):
                         if not isinstance(fmt, dict):
                             continue
-                        add_qn(
-                            fmt.get('quality'),
+                        try:
+                            qn = int(fmt.get('quality'))
+                        except (TypeError, ValueError):
+                            continue
+                        if qn <= 0:
+                            continue
+                        desc = safe_text(
                             fmt.get('new_description')
                             or fmt.get('display_desc')
                             or fmt.get('description')
-                            or ''
-                        )
+                            or '',
+                            50
+                        ).strip()
+                        if desc and not desc.isdigit():
+                            label_map[qn] = desc
+
+                    def add_real(qn, width=0, height=0):
+                        try:
+                            qn = int(qn)
+                        except (TypeError, ValueError):
+                            return
+                        # 126 杜比视界：WebView 可播，MediaMuxer 无法可靠合并，彻底排除
+                        if qn <= 0 or qn == 126:
+                            return
+                        try:
+                            height = int(height or 0)
+                            width = int(width or 0)
+                        except (TypeError, ValueError):
+                            height, width = 0, 0
+                        base = label_map.get(qn) or quality_names.get(qn) or ('画质 ' + str(qn))
+                        # 同一 qn 多编码时保留更高的真实高度
+                        prev = result.get(qn)
+                        prev_h = 0
+                        if prev and '(实际' in str(prev):
+                            pass
+                        tag = height_to_tag(height)
+                        min_h = nominal_min_h.get(qn, 0)
+                        if tag and min_h and height > 0 and height < min_h:
+                            base = '%s (实际%s)' % (base, tag)
+                        elif tag and height > 0 and qn not in quality_names:
+                            base = '%s (%s)' % (base, tag)
+                        # 已有更高实际高度的条目不降级覆盖
+                        if qn in result:
+                            old = result[qn]
+                            # 若旧条目已带实际标注且新高度不更高，保留旧的
+                            if '(实际' in old and height > 0:
+                                return
+                        result[qn] = base
 
                     dash = play_data.get('dash') or {}
-                    for stream in (dash.get('video') or []):
+                    videos = dash.get('video') or []
+                    # 每个 qn 取 height 最大的一条（多编码时更接近真实上限）
+                    best = {}
+                    for stream in videos:
                         if not isinstance(stream, dict):
                             continue
-                        add_qn(stream.get('id'), '')
-
-                    for item in (play_data.get('durl') or []):
-                        if isinstance(item, dict):
-                            add_qn(play_data.get('quality') or item.get('quality'), '')
+                        try:
+                            qn = int(stream.get('id') or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if qn <= 0:
+                            continue
+                        try:
+                            h = int(stream.get('height') or 0)
+                            w = int(stream.get('width') or 0)
+                        except (TypeError, ValueError):
+                            h, w = 0, 0
+                        old = best.get(qn)
+                        if old is None or h > old[1]:
+                            best[qn] = (w, h)
+                    for qn, (w, h) in best.items():
+                        add_real(qn, w, h)
 
                     if not result:
-                        qns = play_data.get('accept_quality') or []
-                        descs = play_data.get('accept_description') or []
-                        for i, raw_qn in enumerate(qns):
-                            desc = descs[i] if i < len(descs) else ''
-                            add_qn(raw_qn, desc)
+                        q = play_data.get('quality')
+                        if q:
+                            add_real(q)
+                        for item in (play_data.get('durl') or []):
+                            if isinstance(item, dict) and item.get('quality'):
+                                add_real(item.get('quality'))
 
                     return sorted(result.items(), key=lambda item: item[0], reverse=True)
 
@@ -2385,41 +2457,100 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     6:   "240P 极速"
                 }
                 qualities_by_qn = {}
+                label_map = {}
+                nominal_min_h = {
+                    6: 200, 16: 300, 32: 400, 48: 600, 64: 600,
+                    74: 600, 80: 900, 100: 900, 112: 900, 116: 900,
+                    120: 1800, 125: 900, 127: 3500,
+                }
 
-                def _add_qn(qn, label=''):
+                def _height_to_tag(h):
+                    try:
+                        h = int(h or 0)
+                    except (TypeError, ValueError):
+                        return ''
+                    if h <= 0:
+                        return ''
+                    if h >= 3500:
+                        return '8K'
+                    if h >= 1800:
+                        return '4K'
+                    if h >= 900:
+                        return '1080P'
+                    if h >= 600:
+                        return '720P'
+                    if h >= 400:
+                        return '480P'
+                    if h >= 300:
+                        return '360P'
+                    return '240P'
+
+                for fmt in (payload.get('support_formats') or []):
+                    if not isinstance(fmt, dict):
+                        continue
+                    try:
+                        qn = int(fmt.get('quality'))
+                    except (TypeError, ValueError):
+                        continue
+                    if qn <= 0:
+                        continue
+                    desc = str(
+                        fmt.get('new_description')
+                        or fmt.get('display_desc')
+                        or fmt.get('description')
+                        or ''
+                    ).strip()
+                    if desc and not desc.isdigit():
+                        label_map[qn] = desc
+
+                def _add_real(qn, width=0, height=0):
                     try:
                         qn = int(qn)
                     except (TypeError, ValueError):
                         return
-                    if qn <= 0 or qn in qualities_by_qn:
+                    # 126 杜比视界：WebView 可播，MediaMuxer 无法可靠合并，彻底排除
+                    if qn <= 0 or qn == 126:
                         return
-                    label = str(label or '').strip()
-                    if not label or label.isdigit():
-                        label = quality_names.get(qn, '画质 ' + str(qn))
-                    qualities_by_qn[qn] = label
+                    try:
+                        height = int(height or 0)
+                    except (TypeError, ValueError):
+                        height = 0
+                    base = label_map.get(qn) or quality_names.get(qn) or ('画质 ' + str(qn))
+                    tag = _height_to_tag(height)
+                    min_h = nominal_min_h.get(qn, 0)
+                    if tag and min_h and height > 0 and height < min_h:
+                        base = '%s (实际%s)' % (base, tag)
+                    if qn in qualities_by_qn and '(实际' in qualities_by_qn[qn]:
+                        return
+                    qualities_by_qn[qn] = base
 
-                for fmt in (payload.get('support_formats') or []):
-                    if isinstance(fmt, dict):
-                        _add_qn(
-                            fmt.get('quality'),
-                            fmt.get('new_description')
-                            or fmt.get('display_desc')
-                            or fmt.get('description')
-                            or ''
-                        )
                 dash = payload.get('dash') or {}
+                best = {}
                 for stream in (dash.get('video') or []):
-                    if isinstance(stream, dict):
-                        _add_qn(stream.get('id'), '')
-                for item in (payload.get('durl') or []):
-                    if isinstance(item, dict):
-                        _add_qn(payload.get('quality') or item.get('quality'), '')
+                    if not isinstance(stream, dict):
+                        continue
+                    try:
+                        qn = int(stream.get('id') or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if qn <= 0:
+                        continue
+                    try:
+                        h = int(stream.get('height') or 0)
+                        w = int(stream.get('width') or 0)
+                    except (TypeError, ValueError):
+                        h, w = 0, 0
+                    old = best.get(qn)
+                    if old is None or h > old[1]:
+                        best[qn] = (w, h)
+                for qn, (w, h) in best.items():
+                    _add_real(qn, w, h)
                 if not qualities_by_qn:
-                    ids = payload.get('accept_quality') or []
-                    desc = payload.get('accept_description') or []
-                    for i, q in enumerate(ids):
-                        label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
-                        _add_qn(q, label)
+                    if payload.get('quality'):
+                        _add_real(payload.get('quality'))
+                    for item in (payload.get('durl') or []):
+                        if isinstance(item, dict) and item.get('quality'):
+                            _add_real(item.get('quality'))
                 qualities = [
                     {'qn': qn, 'label': label}
                     for qn, label in sorted(qualities_by_qn.items(), reverse=True)
