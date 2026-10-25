@@ -1553,10 +1553,18 @@ class HomeScreen(Screen):
                         FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
                         Color = autoclass('android.graphics.Color')
                         R = autoclass('android.R$id')
+                        ViewGroup = autoclass('android.view.ViewGroup')
+                        from jnius import cast as jnius_cast
 
-                        root = activity.findViewById(R.content)
-                        if root is None:
+                        # findViewById 在 jnius 里常被当成 View，没有 addView；
+                        # 必须 cast 成 ViewGroup / FrameLayout 才能挂载子视图。
+                        root_view = activity.findViewById(R.content)
+                        if root_view is None:
                             raise RuntimeError('无法获取 content 根视图')
+                        try:
+                            root = jnius_cast(ViewGroup, root_view)
+                        except Exception:
+                            root = jnius_cast('android.view.ViewGroup', root_view)
 
                         overlay = FrameLayout(activity)
                         overlay.setBackgroundColor(Color.BLACK)
@@ -3111,6 +3119,42 @@ class BiliSyncScreen(Screen):
         self.status.text = '已填入首页解析框；请在解析完成后确认清晰度并下载。'
 
 
+
+def _apply_light_system_bars():
+    """Force white status bar + navigation bar with dark icons (Android)."""
+    if platform != 'android':
+        return
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        activity = PythonActivity.mActivity
+        if activity is None:
+            return
+        Color = autoclass('android.graphics.Color')
+        View = autoclass('android.view.View')
+        window = activity.getWindow()
+        # FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS
+        window.addFlags(0x80000000)
+        # clear FLAG_TRANSLUCENT_STATUS / FLAG_TRANSLUCENT_NAVIGATION
+        window.clearFlags(0x04000000)
+        window.clearFlags(0x08000000)
+        try:
+            window.setStatusBarColor(Color.WHITE)
+        except Exception:
+            pass
+        try:
+            window.setNavigationBarColor(Color.WHITE)
+        except Exception:
+            pass
+        decor = window.getDecorView()
+        flags = decor.getSystemUiVisibility()
+        # SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        flags = flags | 0x00002000 | 0x00000010
+        decor.setSystemUiVisibility(flags)
+    except Exception:
+        pass
+
+
 class BiliDlApp(App):
     """bilibilidl Android UI with an in-app native WebView player overlay."""
     def build(self):
@@ -3118,6 +3162,13 @@ class BiliDlApp(App):
             from kivy.core.window import Window
             Window.clearcolor = BG
             Window.clearcolor = (0.965, 0.961, 0.969, 1)
+        except Exception:
+            pass
+        # 状态栏、导航栏改成白色（避免上下黑边）
+        try:
+            _apply_light_system_bars()
+            Clock.schedule_once(lambda _dt: _apply_light_system_bars(), 0.3)
+            Clock.schedule_once(lambda _dt: _apply_light_system_bars(), 1.0)
         except Exception:
             pass
         self.title = APP_NAME
