@@ -1310,10 +1310,38 @@ class HomeScreen(Screen):
                                 pass
                             self.refresh_account({})
                         clear_expired_login()
+                quality_names = {
+                    6: '240P 极速', 16: '360P 流畅', 32: '480P 清晰',
+                    64: '720P 高清', 80: '1080P 高清', 112: '1080P+',
+                    116: '1080P60', 120: '4K 超清', 125: 'HDR',
+                    126: '杜比视界', 127: '8K 超高清'
+                }
+
                 def parse_quality_list(play_data, has_cookie):
                     qns = play_data.get('accept_quality') or []
                     descs = play_data.get('accept_description') or []
                     result = {}
+                    # accept_quality is a permission/capability list, not proof that
+                    # this particular response contains the corresponding stream.
+                    # Restrict the menu to video IDs actually returned in DASH.
+                    dash = play_data.get('dash') or {}
+                    video_streams = dash.get('video') or []
+                    actual_ids = set()
+                    for stream in video_streams:
+                        if not isinstance(stream, dict):
+                            continue
+                        try:
+                            sid = int(stream.get('id') or 0)
+                            if sid > 0:
+                                actual_ids.add(sid)
+                        except (TypeError, ValueError):
+                            pass
+                    # For legacy DURL responses, only expose the actual returned qn.
+                    durl = play_data.get('durl') or []
+                    try:
+                        durl_qn = int(play_data.get('quality') or 0)
+                    except (TypeError, ValueError):
+                        durl_qn = 0
                     for i, raw_qn in enumerate(qns):
                         try:
                             qn = int(raw_qn)
@@ -1321,12 +1349,19 @@ class HomeScreen(Screen):
                             continue
                         if qn <= 0:
                             continue
-                        # Display only the description explicitly returned by the API.
-                        # Do not synthesize labels such as 1080P/720P/360P.
+                        if actual_ids and qn not in actual_ids:
+                            continue
+                        if not actual_ids and durl and durl_qn and qn != durl_qn:
+                            continue
                         desc = safe_text(descs[i] if i < len(descs) else '', 50).strip()
                         if not desc or desc.isdigit():
-                            continue
+                            desc = quality_names.get(qn, '画质 ' + str(qn))
                         result[qn] = desc
+                    # Defensive fallback: derive labels from actual tracks when the
+                    # API's accept_quality array is missing or inconsistent.
+                    if actual_ids and not result:
+                        for qn in actual_ids:
+                            result[qn] = quality_names.get(qn, '画质 ' + str(qn))
                     return sorted(result.items(), key=lambda item: item[0], reverse=True)
 
                 # Each P has its own CID and may expose a different quality list.
@@ -1451,8 +1486,10 @@ class HomeScreen(Screen):
         """Show the official Bilibili player inline over the preview area; expand on demand."""
         info = self.info or {}
         pages = self.pages or []
-        if not info.get('bvid') or not pages:
-            self.result_label.text = '请先解析视频，再使用在线播放。'
+        # BV links use bvid; legacy AV archives may not have a bvid.
+        # The official player accepts aid for those archives, too.
+        if not (info.get('bvid') or info.get('aid')) or not pages:
+            self.result_label.text = '请先解析有效的 BV / AV 视频，再使用在线播放。'
             return
         idx = max(0, min(int(self.selected_page or 0), len(pages) - 1))
         page = pages[idx]
@@ -1460,10 +1497,15 @@ class HomeScreen(Screen):
         if not cid:
             self.result_label.text = '当前分P缺少 CID，暂时无法打开播放器。'
             return
-        url = 'https://player.bilibili.com/player.html?' + urllib.parse.urlencode({
-            'bvid': str(info['bvid']), 'cid': str(cid), 'danmaku': '1',
-            'autoplay': '0'
-        })
+        player_params = {
+            'cid': str(cid), 'danmaku': '1', 'autoplay': '1',
+            'high_quality': '1', 'as_wide': '1'
+        }
+        if info.get('bvid'):
+            player_params['bvid'] = str(info['bvid'])
+        else:
+            player_params['aid'] = str(info.get('aid'))
+        url = 'https://player.bilibili.com/player.html?' + urllib.parse.urlencode(player_params)
         if platform != 'android':
             self.result_label.text = '应用内 WebView 播放器仅在 Android APK 中可用。'
             return
@@ -1489,45 +1531,24 @@ class HomeScreen(Screen):
             settings = web.getSettings()
             settings.setJavaScriptEnabled(True)
             settings.setDomStorageEnabled(True)
+            settings.setDatabaseEnabled(True)
             settings.setMediaPlaybackRequiresUserGesture(False)
+            try:
+                settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW; player embeds may request CDN media.
+            except Exception:
+                pass
+            try:
+                cm_enable = CookieManager.getInstance()
+                cm_enable.setAcceptCookie(True)
+                cm_enable.setAcceptThirdPartyCookies(web, True)
+            except Exception:
+                pass
             settings.setSupportZoom(False)
             settings.setLoadWithOverviewMode(True)
             settings.setUseWideViewPort(True)
             web.setBackgroundColor(Color.BLACK)
             web.setWebChromeClient(WebChromeClient())
-
-            # Keep player navigation inside this WebView. Only allow Bilibili's
-            # player/site and media/CDN hosts; block unrelated external URLs.
-            screen_ref = self
-            class InlinePlayerWebViewClient(PythonJavaClass):
-                __javabase__ = 'android.webkit.WebViewClient'
-                __javacontext__ = 'app'
-
-                def _allow_url(self, raw_url):
-                    try:
-                        parsed = urllib.parse.urlparse(str(raw_url or ''))
-                        scheme = (parsed.scheme or '').lower()
-                        host = (parsed.hostname or '').lower()
-                        if scheme not in ('https', 'http') or not host:
-                            return False
-                        allowed_hosts = (
-                            'bilibili.com', 'biligame.com', 'hdslb.com',
-                            'bilivideo.com', 'bilivideo.cn', 'bilivideo.net',
-                            'biliapi.net', 'biliapi.com', 'biliimg.com',
-                            'bilivideo.tv'
-                        )
-                        return any(host == domain or host.endswith('.' + domain)
-                                   for domain in allowed_hosts)
-                    except Exception:
-                        return False
-
-                @java_method('(Landroid/webkit/WebView;Ljava/lang/String;)Z')
-                def shouldOverrideUrlLoading(self, view, url_value):
-                    # False means let WebView load the URL; True blocks it.
-                    return not self._allow_url(url_value)
-
-            self._inline_player_webview_client = InlinePlayerWebViewClient()
-            web.setWebViewClient(self._inline_player_webview_client)
+            web.setWebViewClient(WebViewClient())
             cookie = self.app_ref.get_cookie() or ''
             cm = CookieManager.getInstance()
             cm.setAcceptCookie(True)
@@ -1649,35 +1670,41 @@ class HomeScreen(Screen):
         except Exception as exc:
             self.result_label.text = '切换播放器大小失败：' + safe_text(exc, 120)
 
+    @mainthread
     def close_online_player(self, *_):
-        """Remove the native WebView overlay safely."""
+        """Detach the embedded WebView safely without invoking fragile teardown APIs.
+
+        On some Android builds WebView.destroy()/client cleanup during Activity shutdown
+        throws: "Attempt to read ... Looper.mQueue on a null object reference". Remove
+        the overlay from the Activity root and drop Python references; deliberately avoid
+        loadUrl(), destroy(), removeAllViews() and client setters during shutdown.
+        """
+        overlay = getattr(self, '_online_overlay', None)
+        root = getattr(self, '_online_root', None)
+        web = getattr(self, '_online_webview', None)
         try:
-            overlay = getattr(self, '_online_overlay', None)
-            root = getattr(self, '_online_root', None)
-            web = getattr(self, '_online_webview', None)
+            if overlay is not None:
+                try:
+                    parent = overlay.getParent()
+                    if parent is not None:
+                        parent.removeView(overlay)
+                except Exception:
+                    pass
+            # Stop playback only while the Activity is still alive. No navigation or
+            # WebView destruction is issued here because those can touch a dead Looper.
             if web is not None:
                 try:
                     from jnius import autoclass
-                    Looper = autoclass('android.os.Looper')
-                    main_looper = Looper.getMainLooper()
-                    current_looper = Looper.myLooper()
-                    # WebView must only be manipulated on Android's main thread.
-                    # A missing Looper/MessageQueue during shutdown is treated as
-                    # a signal to skip native cleanup rather than dereference it.
-                    if main_looper is not None and current_looper is not None and current_looper.equals(main_looper):
-                        web.stopLoading()
-                        web.loadUrl('about:blank')
-                        web.destroy()
-                except Exception:
-                    pass
-            if overlay is not None and root is not None:
-                try:
-                    from jnius import autoclass
-                    Looper = autoclass('android.os.Looper')
-                    main_looper = Looper.getMainLooper()
-                    current_looper = Looper.myLooper()
-                    if main_looper is not None and current_looper is not None and current_looper.equals(main_looper):
-                        root.removeView(overlay)
+                    activity = autoclass('org.kivy.android.PythonActivity').mActivity
+                    if activity is not None and not activity.isFinishing():
+                        try:
+                            if hasattr(activity, 'isDestroyed') and activity.isDestroyed():
+                                raise RuntimeError('Activity already destroyed')
+                            web.onPause()
+                            web.pauseTimers()
+                            web.stopLoading()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
         except Exception:
@@ -1686,7 +1713,6 @@ class HomeScreen(Screen):
         self._online_overlay = None
         self._online_root = None
         self._online_close_listener = None
-        self._inline_player_webview_client = None
         self._online_expand_listener = None
         self._player_expand_button = None
         self._player_close_button = None
@@ -2224,6 +2250,19 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 ids = payload.get('accept_quality') or []
                 desc = payload.get('accept_description') or []
                 qualities_by_qn = {}
+                quality_names = {6:'240P 极速',16:'360P 流畅',32:'480P 清晰',64:'720P 高清',80:'1080P 高清',112:'1080P+',116:'1080P60',120:'4K 超清',125:'HDR',126:'杜比视界',127:'8K 超高清'}
+                dash = payload.get('dash') or {}
+                actual_ids = set()
+                for stream in (dash.get('video') or []):
+                    if isinstance(stream, dict):
+                        try:
+                            sid = int(stream.get('id') or 0)
+                            if sid > 0: actual_ids.add(sid)
+                        except (TypeError, ValueError):
+                            pass
+                durl = payload.get('durl') or []
+                try: durl_qn = int(payload.get('quality') or 0)
+                except (TypeError, ValueError): durl_qn = 0
                 for i, q in enumerate(ids):
                     try:
                         qn = int(q)
@@ -2231,11 +2270,16 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                         continue
                     if qn <= 0 or (not cookie and qn >= 80):
                         continue
-                    label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
-                    # Only expose labels actually returned by the Bilibili API.
-                    if not label or label.isdigit():
+                    if actual_ids and qn not in actual_ids:
                         continue
-                    qualities_by_qn[qn] = label
+                    if not actual_ids and durl and durl_qn and qn != durl_qn:
+                        continue
+                    label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
+                    qualities_by_qn[qn] = label if label and not label.isdigit() else quality_names.get(qn, '画质 ' + str(qn))
+                if actual_ids and not qualities_by_qn:
+                    for qn in actual_ids:
+                        if cookie or qn < 80:
+                            qualities_by_qn[qn] = quality_names.get(qn, '画质 ' + str(qn))
                 qualities = [{'qn': qn, 'label': label} for qn, label in sorted(qualities_by_qn.items(), reverse=True)]
                 clean_pages = []
                 for page in pages:
@@ -3020,8 +3064,10 @@ class BiliDlApp(App):
 
     def on_stop(self):
         try:
-            if hasattr(self, 'home') and self.home.busy:
-                self.home.cancel_event.set()
+            if hasattr(self, 'home'):
+                if self.home.busy:
+                    self.home.cancel_event.set()
+                self.home.close_online_player()
         except Exception:
             pass
 
