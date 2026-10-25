@@ -1103,6 +1103,24 @@ class ProfileScreen(Screen):
                 pass
 
 
+
+def _main_play_payload(session, info, qn=127):
+    params = {'cid': info.get('cid'), 'qn': int(qn), 'fnval': 4048, 'fnver': 0, 'fourk': 1}
+    if info.get('bvid'):
+        params['bvid'] = info['bvid']
+    elif info.get('aid'):
+        params['avid'] = info['aid']
+    response = session.get('https://api.bilibili.com/x/player/playurl', params=params,
+                           headers={'Referer': 'https://www.bilibili.com/'}, timeout=(8, 18))
+    response.raise_for_status()
+    body = response.json()
+    if body.get('code') != 0:
+        raise RuntimeError('播放信息请求失败：' + str(body.get('message', body.get('code'))))
+    data = body.get('data') or {}
+    if not isinstance(data, dict):
+        raise RuntimeError('播放信息格式错误')
+    return data
+
 class HomeScreen(Screen):
     MODES = [
         '视频 + 音频（MP4）',
@@ -1427,7 +1445,7 @@ class HomeScreen(Screen):
                         tag = height_to_tag(height)
                         min_h = nominal_min_h.get(qn, 0)
                         if tag and min_h and height > 0 and height < min_h:
-                            base = '%s (实际%s)' % (base, tag)
+                            base = '%s（实际尺寸 %s×%s，接口档位 %s）' % (tag, width, height, qn)
                         elif tag and height > 0 and qn not in quality_names:
                             base = '%s (%s)' % (base, tag)
                         # 已有更高实际高度的条目不降级覆盖
@@ -1462,7 +1480,7 @@ class HomeScreen(Screen):
                     for qn, (w, h) in best.items():
                         add_real(qn, w, h)
 
-                    if not result:
+                    if not result and any(isinstance(item, dict) and item.get('url') for item in (play_data.get('durl') or [])):
                         q = play_data.get('quality')
                         if q:
                             add_real(q)
@@ -1481,9 +1499,36 @@ class HomeScreen(Screen):
                     page_info = dict(info)
                     page_info['cid'] = cid
                     try:
-                        page_play = get_play_info(session, page_info)
-                        page_data = page_play.get('data') or {}
-                        qualities_by_page[page_index] = parse_quality_list(page_data, bool(cookie))
+                        try:
+                            page_data = _main_play_payload(session, page_info)
+                        except Exception as exc:
+                            print('[bilibilidl] quality lookup:', safe_text(exc, 180))
+                            page_play = get_play_info(session, page_info)
+                            page_data = page_play.get('data') or {}
+                        verified = dict(parse_quality_list(page_data, bool(cookie)))
+                        candidates = set()
+                        for value in page_data.get('accept_quality') or []:
+                            try:
+                                candidates.add(int(value))
+                            except (TypeError, ValueError):
+                                pass
+                        for fmt in page_data.get('support_formats') or []:
+                            if isinstance(fmt, dict):
+                                try:
+                                    candidates.add(int(fmt.get('quality')))
+                                except (TypeError, ValueError):
+                                    pass
+                        for qn in sorted(candidates, reverse=True):
+                            if generation != self._parse_generation:
+                                return
+                            if qn <= 0 or qn == 126 or qn in verified:
+                                continue
+                            try:
+                                probe = _main_play_payload(session, page_info, qn)
+                                verified.update(dict(parse_quality_list(probe, bool(cookie))))
+                            except Exception as exc:
+                                print('[bilibilidl] quality probe failed:', qn, safe_text(exc, 100))
+                        qualities_by_page[page_index] = sorted(verified.items(), reverse=True)
                     except Exception:
                         qualities_by_page[page_index] = []
                 qlist = qualities_by_page.get(0) or []
@@ -1567,9 +1612,9 @@ class HomeScreen(Screen):
                     if self.auto_play_after_parse:
                         # Let layout settle and previous WebView fully tear down before open.
                         # Too-early open was a common source of Looper NPE + stuck overlay.
-                        Clock.schedule_once(lambda _dt: self.open_online_player(), 0.65)
+                        Clock.schedule_once(lambda _dt: self.open_online_player() if generation == self._parse_generation else None, 0.65)
                         # 部分设备 WebView 初始化慢，再补一次重试，避免黑屏
-                        Clock.schedule_once(lambda _dt: self.open_online_player(), 2.0)
+                        # Avoid opening the player twice.
                 done()
             except Exception as exc:
                 message = safe_text(exc, 220)
@@ -1623,12 +1668,7 @@ class HomeScreen(Screen):
         self.close_online_player()
 
         if platform != 'android':
-            try:
-                import webbrowser
-                webbrowser.open(url)
-                self.result_label.text = '非 Android 环境，已用系统浏览器打开。'
-            except Exception as exc:
-                self.result_label.text = '无法打开：' + safe_text(exc, 120)
+            self.result_label.text = '此应用内播放器仅支持 Android，不会自动打开外部浏览器。'
             return
 
         try:
@@ -1702,21 +1742,9 @@ class HomeScreen(Screen):
                                 pass
                         web.setBackgroundColor(Color.BLACK)
 
-                        # 拦截 B 站页面内的跳转，防止触发系统外部打开
-                        class BiliWebViewClient(PythonJavaClass):
-                            __javainterfaces__ = ['android/webkit/WebViewClient']
-                            __javacontext__ = 'app'
-
-                            @java_method('(Landroid/webkit/WebView;Landroid/webkit/WebResourceRequest;)Z')
-                            def shouldOverrideUrlLoading(self, view, request):
-                                # 返回 True 表示在当前 WebView 内处理，不交给系统
-                                return True
-
-                            @java_method('(Landroid/webkit/WebView;Ljava/lang/String;)Z')
-                            def shouldOverrideUrlLoading(self, view, url):
-                                return True
-
-                        web.setWebViewClient(BiliWebViewClient())
+                        client = WebViewClient()
+                        web.setWebViewClient(client)
+                        screen_ref._online_webview_client = client
 
                         # 禁止网页新开窗口，避免触发降级跳转
                         try:
@@ -1850,51 +1878,10 @@ class HomeScreen(Screen):
             self._fallback_external_player(external_url, safe_text(exc, 140))
 
     def _fallback_external_player(self, url, reason=''):
-        """When in-app WebView fails, open Bilibili App or system browser."""
-        try:
-            if platform == 'android':
-                from jnius import autoclass
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                Uri = autoclass('android.net.Uri')
-                activity = PythonActivity.mActivity
-                bvid = ''
-                try:
-                    bvid = str((self.info or {}).get('bvid') or '')
-                except Exception:
-                    pass
-                launched = False
-                if activity is not None and bvid:
-                    try:
-                        intent = Intent(
-                            Intent.ACTION_VIEW,
-                            Uri.parse('bilibili://video/' + bvid)
-                        )
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        if intent.resolveActivity(activity.getPackageManager()) is not None:
-                            activity.startActivity(intent)
-                            launched = True
-                    except Exception:
-                        launched = False
-                if not launched and activity is not None:
-                    intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    activity.startActivity(intent)
-                    launched = True
-                if launched:
-                    self.result_label.text = (
-                        '应用内播放失败，已改用外部打开。'
-                        + ((' 原因：' + reason) if reason else '')
-                    )
-                    self.player_hint.text = '已交给 B 站 App / 浏览器播放'
-                    return
-            import webbrowser
-            webbrowser.open(url)
-            self.result_label.text = '已用系统浏览器打开播放页。'
-        except Exception as exc:
-            self.result_label.text = (
-                '播放失败：' + (reason or safe_text(exc, 120))
-            )
+        """Keep playback failures in the app, without launching a browser."""
+        self.close_online_player()
+        self.result_label.text = '应用内播放失败：' + (reason or '播放器未能初始化，请重试。')
+        self.player_hint.text = '未跳转外部浏览器，可再次点击在线播放重试。'
 
     def _position_inline_player(self):
         return
