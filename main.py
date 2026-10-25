@@ -1481,7 +1481,7 @@ class HomeScreen(Screen):
                     page_info = dict(info)
                     page_info['cid'] = cid
                     try:
-                        page_play = get_play_info(session, page_info, cookie)
+                        page_play = get_play_info(session, page_info)
                         page_data = page_play.get('data') or {}
                         qualities_by_page[page_index] = parse_quality_list(page_data, bool(cookie))
                     except Exception:
@@ -1568,6 +1568,8 @@ class HomeScreen(Screen):
                         # Let layout settle and previous WebView fully tear down before open.
                         # Too-early open was a common source of Looper NPE + stuck overlay.
                         Clock.schedule_once(lambda _dt: self.open_online_player(), 0.65)
+                        # 部分设备 WebView 初始化慢，再补一次重试，避免黑屏
+                        Clock.schedule_once(lambda _dt: self.open_online_player(), 2.0)
                 done()
             except Exception as exc:
                 message = safe_text(exc, 220)
@@ -1613,7 +1615,6 @@ class HomeScreen(Screen):
             'bvid': str(info['bvid']),
             'cid': str(cid),
             'danmaku': '1',
-            'autoplay': '1',
             'high_quality': '1',
         })
         external_url = 'https://www.bilibili.com/video/%s' % info['bvid']
@@ -1686,13 +1687,44 @@ class HomeScreen(Screen):
                         settings.setDisplayZoomControls(False)
                         settings.setLoadWithOverviewMode(True)
                         settings.setUseWideViewPort(True)
+                        # 允许混合内容，避免 HTTPS 页面加载 HTTP 视频流被拦截
+                        try:
+                            settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW
+                        except Exception:
+                            pass
+                        # 硬件加速在部分设备上会导致 WebView 黑屏，先尝试开启，失败则降级
                         try:
                             web.setLayerType(2, None)  # HARDWARE
                         except Exception:
-                            pass
+                            try:
+                                web.setLayerType(1, None)  # SOFTWARE
+                            except Exception:
+                                pass
                         web.setBackgroundColor(Color.BLACK)
+
+                        # 拦截 B 站页面内的跳转，防止触发系统外部打开
+                        class BiliWebViewClient(PythonJavaClass):
+                            __javainterfaces__ = ['android/webkit/WebViewClient']
+                            __javacontext__ = 'app'
+
+                            @java_method('(Landroid/webkit/WebView;Landroid/webkit/WebResourceRequest;)Z')
+                            def shouldOverrideUrlLoading(self, view, request):
+                                # 返回 True 表示在当前 WebView 内处理，不交给系统
+                                return True
+
+                            @java_method('(Landroid/webkit/WebView;Ljava/lang/String;)Z')
+                            def shouldOverrideUrlLoading(self, view, url):
+                                return True
+
+                        web.setWebViewClient(BiliWebViewClient())
+
+                        # 禁止网页新开窗口，避免触发降级跳转
+                        try:
+                            settings.setSupportMultipleWindows(False)
+                        except Exception:
+                            pass
+
                         web.setWebChromeClient(WebChromeClient())
-                        web.setWebViewClient(WebViewClient())
 
                         try:
                             cm = CookieManager.getInstance()
@@ -1770,6 +1802,12 @@ class HomeScreen(Screen):
                         except Exception:
                             pass
                         msg = safe_text(exc, 140)
+                        # 打印异常日志，便于排查 WebView 初始化失败原因
+                        try:
+                            print('[bilibilidl] WebView init failed:', msg)
+                            traceback.print_exc()
+                        except Exception:
+                            pass
                         Clock.schedule_once(
                             lambda _dt: screen_ref._fallback_external_player(
                                 external_url, msg
@@ -2441,7 +2479,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     'part': info.get('title', 'P1'),
                     'duration': info.get('duration', 0)
                 }]
-                play = get_play_info(session, info, cookie)
+                play = get_play_info(session, info)
                 payload = play.get('data') or {}
                 quality_names = {
                     127: "8K 超高清(大会员)",
