@@ -1429,8 +1429,9 @@ class HomeScreen(Screen):
                     self.refresh_parts()
                     self.parse_btn.disabled = False
                     if self.auto_play_after_parse:
-                        # Let the parsed metadata and page controls settle before opening WebView.
-                        Clock.schedule_once(lambda _dt: self.open_online_player(), 0.35)
+                        # Let layout settle and previous WebView fully tear down before open.
+                        # Too-early open was a common source of Looper NPE + stuck overlay.
+                        Clock.schedule_once(lambda _dt: self.open_online_player(), 0.65)
                 done()
             except Exception as exc:
                 message = safe_text(exc, 220)
@@ -1455,7 +1456,13 @@ class HomeScreen(Screen):
         self.auto_play_btn.fg = WHITE if self.auto_play_after_parse else INK
 
     def open_online_player(self, *_):
-        """Show the official Bilibili player inline over the preview area; expand on demand."""
+        """Show the official Bilibili player inline over the preview area; expand on demand.
+
+        Critical: if anything fails after the native FrameLayout is added to the
+        Activity, we MUST remove it; otherwise a transparent overlay permanently
+        intercepts all touches (buttons become unclickable) and WebView teardown
+        can trigger Looper/MessageQueue NPEs.
+        """
         info = self.info or {}
         pages = self.pages or []
         if not info.get('bvid') or not pages:
@@ -1474,6 +1481,13 @@ class HomeScreen(Screen):
         if platform != 'android':
             self.result_label.text = '应用内 WebView 播放器仅在 Android APK 中可用。'
             return
+
+        # Always start from a clean slate so a previous failed open cannot block UI.
+        self.close_online_player()
+
+        overlay = None
+        root = None
+        web = None
         try:
             from jnius import autoclass, PythonJavaClass, java_method
             from kivy.core.window import Window
@@ -1486,12 +1500,14 @@ class HomeScreen(Screen):
             NativeButton = autoclass('android.widget.Button')
             Gravity = autoclass('android.view.Gravity')
             ViewGroup = autoclass('android.view.ViewGroup')
-            View = autoclass('android.view.View')
             LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
             FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
             Color = autoclass('android.graphics.Color')
             activity = PythonActivity.mActivity
-            self.close_online_player()
+            if activity is None:
+                self.result_label.text = 'Activity 尚未就绪，请稍后再试播放。'
+                return
+
             web = WebView(activity)
             settings = web.getSettings()
             settings.setJavaScriptEnabled(True)
@@ -1500,30 +1516,43 @@ class HomeScreen(Screen):
             settings.setSupportZoom(False)
             settings.setLoadWithOverviewMode(True)
             settings.setUseWideViewPort(True)
+            try:
+                # Reduce some surface/hardware path crashes on older devices.
+                web.setLayerType(web.LAYER_TYPE_HARDWARE, None)
+            except Exception:
+                pass
             web.setBackgroundColor(Color.BLACK)
             web.setWebChromeClient(WebChromeClient())
             web.setWebViewClient(WebViewClient())
+
             cookie = self.app_ref.get_cookie() or ''
-            cm = CookieManager.getInstance()
-            cm.setAcceptCookie(True)
-            if cookie:
-                for pair in cookie.split(';'):
-                    pair = pair.strip()
-                    if '=' in pair:
-                        cm.setCookie('https://www.bilibili.com/', pair)
-                        cm.setCookie('https://player.bilibili.com/', pair)
             try:
-                cm.flush()
+                cm = CookieManager.getInstance()
+                cm.setAcceptCookie(True)
+                if cookie:
+                    for pair in cookie.split(';'):
+                        pair = pair.strip()
+                        if '=' in pair:
+                            cm.setCookie('https://www.bilibili.com/', pair)
+                            cm.setCookie('https://player.bilibili.com/', pair)
+                try:
+                    cm.flush()
+                except Exception:
+                    pass
             except Exception:
+                # Cookie injection failure should not block playback of public videos.
                 pass
 
             root = activity.findViewById(autoclass('android.R$id').content)
+            if root is None:
+                raise RuntimeError('无法获取 Activity content 根视图')
             overlay = FrameLayout(activity)
             overlay.setBackgroundColor(Color.TRANSPARENT)
             # Keep the overlay container full-sized, but the WebView itself is placed
             # exactly over the Kivy preview widget so it does not cover labels/buttons.
             overlay_params = LayoutParams(-1, -1)
             root.addView(overlay, overlay_params)
+
             self._online_webview = web
             self._online_overlay = overlay
             self._online_root = root
@@ -1537,18 +1566,23 @@ class HomeScreen(Screen):
             overlay.addView(web)
 
             screen_ref = self
+
             class ToggleListener(PythonJavaClass):
                 __javainterfaces__ = ['android/view/View$OnClickListener']
                 __javacontext__ = 'app'
+
                 @java_method('(Landroid/view/View;)V')
                 def onClick(self, view):
                     Clock.schedule_once(lambda _dt: screen_ref.toggle_player_size(), 0)
+
             class CloseListener(PythonJavaClass):
                 __javainterfaces__ = ['android/view/View$OnClickListener']
                 __javacontext__ = 'app'
+
                 @java_method('(Landroid/view/View;)V')
                 def onClick(self, view):
                     Clock.schedule_once(lambda _dt: screen_ref.close_online_player(), 0)
+
             expand_btn = NativeButton(activity)
             expand_btn.setText('放大 ⛶')
             expand_btn.setTextColor(Color.WHITE)
@@ -1557,12 +1591,13 @@ class HomeScreen(Screen):
             close_btn.setText('关闭 ×')
             close_btn.setTextColor(Color.WHITE)
             close_btn.setBackgroundColor(Color.argb(225, 70, 70, 70))
+            density = float(activity.getResources().getDisplayMetrics().density)
             ep = FrameParams(-2, -2)
             ep.gravity = Gravity.TOP | Gravity.RIGHT
-            ep.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
+            ep.topMargin = int(dp(4) * density)
             cp = FrameParams(-2, -2)
             cp.gravity = Gravity.TOP | Gravity.LEFT
-            cp.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
+            cp.topMargin = int(dp(4) * density)
             overlay.addView(expand_btn, ep)
             overlay.addView(close_btn, cp)
             self._online_expand_listener = ToggleListener()
@@ -1576,6 +1611,38 @@ class HomeScreen(Screen):
             self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
             self.result_label.text = '播放器已显示在视频预览区域，不会覆盖标题和下载设置。'
         except Exception as exc:
+            # Any failure after addView MUST clean the overlay, otherwise the UI
+            # becomes permanently unresponsive and subsequent destroys can NPE.
+            try:
+                if web is not None:
+                    try:
+                        web.stopLoading()
+                    except Exception:
+                        pass
+                    try:
+                        web.loadUrl('about:blank')
+                    except Exception:
+                        pass
+                    try:
+                        web.destroy()
+                    except Exception:
+                        pass
+                if overlay is not None and root is not None:
+                    try:
+                        root.removeView(overlay)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._online_webview = None
+            self._online_overlay = None
+            self._online_root = None
+            self._online_close_listener = None
+            self._online_expand_listener = None
+            self._player_expand_button = None
+            self._player_close_button = None
+            self._player_native = None
+            self._player_fullscreen = False
             self.result_label.text = '应用内播放器启动失败：' + safe_text(exc, 160)
 
     def _position_inline_player(self):
@@ -1603,9 +1670,6 @@ class HomeScreen(Screen):
             return
         try:
             FrameParams = self._player_native['FrameParams']
-            Gravity = self._player_native['Gravity']
-            density = float(self._player_native['Window'].width / max(1, self._player_native['Window'].width))
-            # Android LayoutParams use physical pixels. Kivy dp is converted using device density.
             from kivy.metrics import Metrics
             density = float(Metrics.density or 1.0)
             self._player_fullscreen = not self._player_fullscreen
@@ -1625,22 +1689,17 @@ class HomeScreen(Screen):
             self.result_label.text = '切换播放器大小失败：' + safe_text(exc, 120)
 
     def close_online_player(self, *_):
-        """Remove the native WebView overlay safely."""
-        try:
-            overlay = getattr(self, '_online_overlay', None)
-            root = getattr(self, '_online_root', None)
-            web = getattr(self, '_online_webview', None)
-            if web is not None:
-                try:
-                    web.stopLoading()
-                    web.loadUrl('about:blank')
-                    web.destroy()
-                except Exception:
-                    pass
-            if overlay is not None and root is not None:
-                root.removeView(overlay)
-        except Exception:
-            pass
+        """Remove the native WebView overlay safely.
+
+        Order matters: stop loading -> blank page -> remove from parent -> destroy.
+        Doing destroy while still attached, or from a half-torn-down state, is a
+        frequent source of android.os.Looper / MessageQueue null-reference crashes.
+        """
+        web = getattr(self, '_online_webview', None)
+        overlay = getattr(self, '_online_overlay', None)
+        root = getattr(self, '_online_root', None)
+        # Clear Python refs first so concurrent autoplay/open cannot re-use a
+        # half-destroyed object.
         self._online_webview = None
         self._online_overlay = None
         self._online_root = None
@@ -1650,6 +1709,38 @@ class HomeScreen(Screen):
         self._player_close_button = None
         self._player_native = None
         self._player_fullscreen = False
+        try:
+            if web is not None:
+                try:
+                    web.stopLoading()
+                except Exception:
+                    pass
+                try:
+                    web.loadUrl('about:blank')
+                except Exception:
+                    pass
+                try:
+                    # Detach before destroy to avoid MessageQueue races.
+                    parent = web.getParent()
+                    if parent is not None:
+                        parent.removeView(web)
+                except Exception:
+                    pass
+                try:
+                    web.destroy()
+                except Exception:
+                    pass
+            if overlay is not None and root is not None:
+                try:
+                    root.removeView(overlay)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self.player_hint.text = '解析后可在此区域直接播放视频'
+        except Exception:
+            pass
 
     @mainthread
     def _set_cover_preview(self, raw):
@@ -2699,7 +2790,12 @@ class BiliSyncScreen(Screen):
 
     def sync_all(self, *_):
         if not self.app_ref.get_cookie():
-            self.status.text = '请先在「我的」页面完成 B 站授权登录。'; return
+            self.status.text = '请先在「我的」页面完成 B 站授权登录。'
+            return
+        if getattr(self, '_sync_busy', False):
+            self.status.text = '同步仍在进行中，请稍候…'
+            return
+        self._sync_busy = True
         self.status.text = '正在同步历史记录和收藏夹…'
         def worker():
             try:
@@ -2711,49 +2807,116 @@ class BiliSyncScreen(Screen):
                 mid = int(nav.get('mid') or self.app_ref.profile_data.get('mid') or 0)
                 history = []
                 cursor = {'max': 0, 'view_at': 0, 'business': 'archive', 'ps': 30}
-                for _ in range(8):
-                    data = self._request_json(session, 'https://api.bilibili.com/x/web-interface/history/cursor', cursor)
+                # Cap history pages to keep sync responsive and avoid UI freezes.
+                for page_i in range(5):
+                    data = self._request_json(
+                        session,
+                        'https://api.bilibili.com/x/web-interface/history/cursor',
+                        cursor
+                    )
                     rows = data.get('list') or []
                     history.extend(self._history_item(x) for x in rows if isinstance(x, dict))
                     c = data.get('cursor') or {}
-                    if not rows or not c or int(c.get('view_at') or 0) == int(cursor.get('view_at') or 0) and int(c.get('max') or 0) == int(cursor.get('max') or 0):
+                    if (not rows or not c
+                            or (int(c.get('view_at') or 0) == int(cursor.get('view_at') or 0)
+                                and int(c.get('max') or 0) == int(cursor.get('max') or 0))):
                         break
-                    cursor = {'max': c.get('max', 0), 'view_at': c.get('view_at', 0), 'business': c.get('business') or 'archive', 'ps': 30}
+                    cursor = {
+                        'max': c.get('max', 0),
+                        'view_at': c.get('view_at', 0),
+                        'business': c.get('business') or 'archive',
+                        'ps': 30
+                    }
+                    @mainthread
+                    def hist_progress(n=len(history), i=page_i + 1):
+                        self.status.text = '历史记录同步中… 已获取 %d 条（第 %d 页）' % (n, i)
+                    hist_progress()
                 folders, favorites = [], []
                 if mid:
-                    fdata = self._request_json(session, 'https://api.bilibili.com/x/v3/fav/folder/created/list-all', {'up_mid': mid, 'ps': 50, 'pn': 1})
+                    fdata = self._request_json(
+                        session,
+                        'https://api.bilibili.com/x/v3/fav/folder/created/list-all',
+                        {'up_mid': mid, 'ps': 50, 'pn': 1}
+                    )
                     folders = (fdata.get('list') or []) if isinstance(fdata, dict) else []
-                    for folder in folders[:30]:
+                    # Limit folders & items per folder to prevent long freezes / OOM.
+                    max_folders = 12
+                    for fi, folder in enumerate(folders[:max_folders]):
                         fid = folder.get('id') or folder.get('media_id')
-                        if not fid: continue
+                        if not fid:
+                            continue
                         try:
-                            fcontent = self._request_json(session, 'https://api.bilibili.com/x/v3/fav/resource/list', {'media_id': fid, 'pn': 1, 'ps': 100, 'order': 'mtime', 'type': 0})
+                            fcontent = self._request_json(
+                                session,
+                                'https://api.bilibili.com/x/v3/fav/resource/list',
+                                {
+                                    'media_id': fid, 'pn': 1, 'ps': 50,
+                                    'order': 'mtime', 'type': 0
+                                }
+                            )
                             media = fcontent.get('medias') or []
-                            favorites.extend(self._favorite_item(x, folder.get('title') or '') for x in media if isinstance(x, dict))
+                            favorites.extend(
+                                self._favorite_item(x, folder.get('title') or '')
+                                for x in media if isinstance(x, dict)
+                            )
                         except Exception:
                             continue
+                        @mainthread
+                        def fav_progress(done=fi + 1, total=min(len(folders), max_folders), n=len(favorites)):
+                            self.status.text = (
+                                '收藏夹同步中… %d/%d · 已缓存视频 %d 条'
+                                % (done, total, n)
+                            )
+                        fav_progress()
                 # De-duplicate by video id, keeping newest item.
                 def dedupe(items):
                     out, seen = [], set()
                     for x in items:
                         key = x.get('bvid') or str(x.get('aid') or '')
-                        if key and key not in seen: seen.add(key); out.append(x)
+                        if key and key not in seen:
+                            seen.add(key)
+                            out.append(x)
                     return out
-                new_cache = {'history': dedupe(history), 'favorites': dedupe(favorites),
-                             'folders': [{'id': f.get('id') or f.get('media_id'), 'title': f.get('title') or '收藏夹', 'media_count': f.get('media_count') or 0} for f in folders],
-                             'synced_at': int(time.time())}
+                new_cache = {
+                    'history': dedupe(history),
+                    'favorites': dedupe(favorites),
+                    'folders': [
+                        {
+                            'id': f.get('id') or f.get('media_id'),
+                            'title': f.get('title') or '收藏夹',
+                            'media_count': f.get('media_count') or 0
+                        }
+                        for f in folders
+                    ],
+                    'synced_at': int(time.time())
+                }
+
                 @mainthread
                 def done():
-                    self.cache = new_cache; self.save_cache(); self.set_mode(self.mode)
-                    self.status.text = '同步完成：历史 %d 条 · 收藏视频 %d 条 · 收藏夹 %d 个' % (len(new_cache['history']), len(new_cache['favorites']), len(new_cache['folders']))
+                    self._sync_busy = False
+                    self.cache = new_cache
+                    self.save_cache()
+                    self.set_mode(self.mode)
+                    self.status.text = (
+                        '同步完成：历史 %d 条 · 收藏视频 %d 条 · 收藏夹 %d 个'
+                        % (
+                            len(new_cache['history']),
+                            len(new_cache['favorites']),
+                            len(new_cache['folders'])
+                        )
+                    )
                     self.render_items()
                 done()
             except Exception as exc:
                 msg = safe_text(exc, 220)
+
                 @mainthread
-                def failed(): self.status.text = '同步失败：' + msg
+                def failed():
+                    self._sync_busy = False
+                    self.status.text = '同步失败：' + msg
                 failed()
         threading.Thread(target=worker, daemon=True, name='bili-sync').start()
+
 
     def search(self, *_):
         keyword = safe_text(self.search_input.text.strip(), 100)
@@ -2790,28 +2953,60 @@ class BiliSyncScreen(Screen):
     def render_items(self, items=None):
         self.list_box.clear_widgets()
         if items is None:
-            items = self.cache.get(self.mode, []) if self.mode in ('history','favorites') else []
+            items = self.cache.get(self.mode, []) if self.mode in ('history', 'favorites') else []
         items = items or []
         if not items:
             card = Card(bg=WHITE, radius=dp(17), padding=dp(16), size_hint_y=None, height=dp(110))
             card.add_widget(ui_label('暂无内容', 16, INK, 28, halign='center'))
-            card.add_widget(ui_label('点击「同步账号数据」获取历史记录和收藏，或切换到「B站搜索」。', 11, GRAY, 42, halign='center'))
-            self.list_box.add_widget(card); return
-        for item in items[:300]:
-            card = Card(bg=WHITE, radius=dp(15), padding=[dp(11), dp(9), dp(11), dp(9)], spacing=dp(4), size_hint_y=None, height=dp(102))
+            card.add_widget(ui_label(
+                '点击「同步账号数据」获取历史记录和收藏，或切换到「B站搜索」。',
+                11, GRAY, 42, halign='center'
+            ))
+            self.list_box.add_widget(card)
+            return
+        # Cap visible cards: creating hundreds of Kivy widgets on Android can
+        # freeze the UI or trigger black screens / low-memory kills.
+        max_show = 80
+        shown = items[:max_show]
+        for item in shown:
+            card = Card(
+                bg=WHITE, radius=dp(15),
+                padding=[dp(11), dp(9), dp(11), dp(9)],
+                spacing=dp(4), size_hint_y=None, height=dp(102)
+            )
             title = safe_text(item.get('title') or '无标题', 140)
             card.add_widget(ui_label(title, 12, INK, 36, bold=True))
             meta = safe_text(item.get('author') or '', 80)
-            if item.get('folder'): meta += ' · ' + safe_text(item.get('folder'), 50)
-            if item.get('view_at'): meta += ' · ' + time.strftime('%Y-%m-%d', time.localtime(int(item['view_at'])))
-            card.add_widget(ui_label(meta or (item.get('bvid') or 'B站视频'), 10, GRAY, 20, bold=False))
+            if item.get('folder'):
+                meta += ' · ' + safe_text(item.get('folder'), 50)
+            if item.get('view_at'):
+                try:
+                    meta += ' · ' + time.strftime(
+                        '%Y-%m-%d', time.localtime(int(item['view_at']))
+                    )
+                except Exception:
+                    pass
+            card.add_widget(ui_label(
+                meta or (item.get('bvid') or 'B站视频'), 10, GRAY, 20, bold=False
+            ))
             row = BoxLayout(size_hint_y=None, height=dp(30), spacing=dp(6))
             play = PinkButton(text='播放', bg=PALE, fg=PINK, font_size=dp(11))
             play.bind(on_release=lambda _b, x=item: self.open_item(x))
             download = PinkButton(text='解析并下载', bg=PINK, fg=WHITE, font_size=dp(11))
             download.bind(on_release=lambda _b, x=item: self.download_item(x))
-            row.add_widget(play); row.add_widget(download); card.add_widget(row)
+            row.add_widget(play)
+            row.add_widget(download)
+            card.add_widget(row)
             self.list_box.add_widget(card)
+        if len(items) > max_show:
+            more = Card(bg=PALE, radius=dp(12), padding=dp(10), size_hint_y=None, height=dp(48))
+            more.add_widget(ui_label(
+                '仅显示前 %d 条（共 %d 条）。可使用上方搜索缩小范围。'
+                % (max_show, len(items)),
+                11, GRAY, 28, halign='center'
+            ))
+            self.list_box.add_widget(more)
+
 
     def open_item(self, item):
         bvid = item.get('bvid')
