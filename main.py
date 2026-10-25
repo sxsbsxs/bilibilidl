@@ -1348,22 +1348,56 @@ class HomeScreen(Screen):
                 }
 
                 def parse_quality_list(play_data, has_cookie):
-                    qns = play_data.get('accept_quality') or []
-                    descs = play_data.get('accept_description') or []
+                    """只收集该视频真实可播的清晰度，禁止用账号权限列表冒充片源。
+
+                    优先级：
+                    1) support_formats —— B站标明本视频支持的格式
+                    2) dash.video 实际下发的流 id
+                    3) durl 一体流的 quality
+                    不用 accept_quality 单独建列表（它常含账号可申请但片源没有的档位）
+                    """
                     result = {}
-                    for i, raw_qn in enumerate(qns):
+
+                    def add_qn(qn, desc=''):
                         try:
-                            qn = int(raw_qn)
+                            qn = int(qn)
                         except (TypeError, ValueError):
-                            continue
-                        if qn <= 0:
-                            continue
-                        desc = safe_text(descs[i] if i < len(descs) else '', 50).strip()
+                            return
+                        if qn <= 0 or qn in result:
+                            return
+                        desc = safe_text(desc, 50).strip()
                         if not desc or desc.isdigit():
                             desc = quality_names.get(qn, '画质 ' + str(qn))
-                        # Do not invent unavailable qualities. Login status is
-                        # validated by nav above; trust the API's returned list.
                         result[qn] = desc
+
+                    for fmt in (play_data.get('support_formats') or []):
+                        if not isinstance(fmt, dict):
+                            continue
+                        add_qn(
+                            fmt.get('quality'),
+                            fmt.get('new_description')
+                            or fmt.get('display_desc')
+                            or fmt.get('description')
+                            or ''
+                        )
+
+                    dash = play_data.get('dash') or {}
+                    for stream in (dash.get('video') or []):
+                        if not isinstance(stream, dict):
+                            continue
+                        add_qn(stream.get('id'), '')
+
+                    for item in (play_data.get('durl') or []):
+                        if isinstance(item, dict):
+                            add_qn(play_data.get('quality') or item.get('quality'), '')
+
+                    if not result:
+                        qns = play_data.get('accept_quality') or []
+                        descs = play_data.get('accept_description') or []
+                        for i, raw_qn in enumerate(qns):
+                            desc = descs[i] if i < len(descs) else ''
+                            add_qn(raw_qn, desc)
+
                     return sorted(result.items(), key=lambda item: item[0], reverse=True)
 
                 # Each P has its own CID and may expose a different quality list.
@@ -2337,9 +2371,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 }]
                 play = get_play_info(session, info, cookie)
                 payload = play.get('data') or {}
-                ids = payload.get('accept_quality') or []
-                desc = payload.get('accept_description') or []
-                qualities_by_qn = {}
                 quality_names = {
                     127: "8K 超高清(大会员)",
                     120: "4K 超清(大会员)",
@@ -2353,16 +2384,46 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     16:  "360P 流畅",
                     6:   "240P 极速"
                 }
-                for i, q in enumerate(ids):
+                qualities_by_qn = {}
+
+                def _add_qn(qn, label=''):
                     try:
-                        qn = int(q)
+                        qn = int(qn)
                     except (TypeError, ValueError):
-                        continue
-                    if qn <= 0 or (not cookie and qn >= 80):
-                        continue
-                    label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
-                    qualities_by_qn[qn] = label if label and not label.isdigit() else quality_names.get(qn, '画质 ' + str(qn))
-                qualities = [{'qn': qn, 'label': label} for qn, label in sorted(qualities_by_qn.items(), reverse=True)]
+                        return
+                    if qn <= 0 or qn in qualities_by_qn:
+                        return
+                    label = str(label or '').strip()
+                    if not label or label.isdigit():
+                        label = quality_names.get(qn, '画质 ' + str(qn))
+                    qualities_by_qn[qn] = label
+
+                for fmt in (payload.get('support_formats') or []):
+                    if isinstance(fmt, dict):
+                        _add_qn(
+                            fmt.get('quality'),
+                            fmt.get('new_description')
+                            or fmt.get('display_desc')
+                            or fmt.get('description')
+                            or ''
+                        )
+                dash = payload.get('dash') or {}
+                for stream in (dash.get('video') or []):
+                    if isinstance(stream, dict):
+                        _add_qn(stream.get('id'), '')
+                for item in (payload.get('durl') or []):
+                    if isinstance(item, dict):
+                        _add_qn(payload.get('quality') or item.get('quality'), '')
+                if not qualities_by_qn:
+                    ids = payload.get('accept_quality') or []
+                    desc = payload.get('accept_description') or []
+                    for i, q in enumerate(ids):
+                        label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
+                        _add_qn(q, label)
+                qualities = [
+                    {'qn': qn, 'label': label}
+                    for qn, label in sorted(qualities_by_qn.items(), reverse=True)
+                ]
                 clean_pages = []
                 for page in pages:
                     clean_pages.append({
