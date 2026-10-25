@@ -1778,7 +1778,37 @@ class HomeScreen(Screen):
                         screen_ref._online_close_listener = listener
                         screen_ref._player_close_button = close_btn
 
-                        web.loadUrl(url)
+                        # 优先尝试直接加载 B 站播放器页面
+                        # 若设备 WebView 拦截或跳转异常，自动降级到本地 HTML 包裹 iframe
+                        try:
+                            web.loadUrl(url)
+                        except Exception:
+                            # 本地 HTML 包裹官方 iframe，确保在应用内播放
+                            html = (
+                                '<!DOCTYPE html><html><head>'
+                                '<meta charset="utf-8">'
+                                '<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">'
+                                '<style>body{margin:0;padding:0;background:#000;overflow:hidden}'
+                                'iframe{width:100vw;height:100vh;border:none;display:block}</style>'
+                                '</head><body>'
+                                '<iframe src="' + url + '" '
+                                'frameborder="no" framespacing="0" '
+                                'allowfullscreen="true" '
+                                'scrolling="no">'
+                                '</iframe>'
+                                '</body></html>'
+                            )
+                            try:
+                                web.loadDataWithBaseURL(
+                                    'https://player.bilibili.com/',
+                                    html,
+                                    'text/html',
+                                    'utf-8',
+                                    None
+                                )
+                            except Exception as html_exc:
+                                print('[bilibilidl] loadDataWithBaseURL failed:', safe_text(html_exc, 120))
+
                         Clock.schedule_once(
                             lambda _dt: setattr(
                                 screen_ref.player_hint,
