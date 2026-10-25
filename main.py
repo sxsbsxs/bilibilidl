@@ -1310,13 +1310,6 @@ class HomeScreen(Screen):
                                 pass
                             self.refresh_account({})
                         clear_expired_login()
-                quality_names = {
-                    6: '240P 极速', 16: '360P 流畅', 32: '480P 清晰',
-                    64: '720P 高清', 80: '1080P 高清', 112: '1080P+',
-                    116: '1080P60', 120: '4K 超清', 125: 'HDR',
-                    126: '杜比视界', 127: '8K 超高清'
-                }
-
                 def parse_quality_list(play_data, has_cookie):
                     qns = play_data.get('accept_quality') or []
                     descs = play_data.get('accept_description') or []
@@ -1328,11 +1321,11 @@ class HomeScreen(Screen):
                             continue
                         if qn <= 0:
                             continue
+                        # Display only the description explicitly returned by the API.
+                        # Do not synthesize labels such as 1080P/720P/360P.
                         desc = safe_text(descs[i] if i < len(descs) else '', 50).strip()
                         if not desc or desc.isdigit():
-                            desc = quality_names.get(qn, '画质 ' + str(qn))
-                        # Do not invent unavailable qualities. Login status is
-                        # validated by nav above; trust the API's returned list.
+                            continue
                         result[qn] = desc
                     return sorted(result.items(), key=lambda item: item[0], reverse=True)
 
@@ -1392,7 +1385,11 @@ class HomeScreen(Screen):
                     self.task_video_owner.text = 'UP主：' + safe_text(owner_name, 70) + ' · ' + fmt_duration(info.get('duration'))
                     self.quality_btn.disabled = not bool(qlist)
                     self.play_btn.disabled = not bool(info.get('bvid') and pages)
-                    self.quality_btn.text = qlist[0][1] if qlist else '暂无可用清晰度'
+                    self.quality_btn.text = (
+                        ('清晰度：' + qlist[0][1]
+                         + (' (%s)' % qlist[0][0] if qlist[0][0] else ''))
+                        if qlist else '暂无可用清晰度'
+                    )
                     self.cover_preview.source = ''
                     self.task_cover.source = ''
                     if cover:
@@ -1463,22 +1460,10 @@ class HomeScreen(Screen):
         if not cid:
             self.result_label.text = '当前分P缺少 CID，暂时无法打开播放器。'
             return
-        # Use the actual API quality ID selected for the current P/CID.
-        try:
-            selected_qn = int(self.qualities[self.quality_index][0])
-        except (IndexError, TypeError, ValueError):
-            selected_qn = 0
-        player_params = {
-            'bvid': str(info['bvid']),
-            'cid': str(cid),
-            'danmaku': '1',
-            'autoplay': '0',
-            'high_quality': '1',
-        }
-        if selected_qn > 0:
-            player_params['qn'] = str(selected_qn)
-            player_params['quality'] = str(selected_qn)
-        url = 'https://player.bilibili.com/player.html?' + urllib.parse.urlencode(player_params)
+        url = 'https://player.bilibili.com/player.html?' + urllib.parse.urlencode({
+            'bvid': str(info['bvid']), 'cid': str(cid), 'danmaku': '1',
+            'autoplay': '0'
+        })
         if platform != 'android':
             self.result_label.text = '应用内 WebView 播放器仅在 Android APK 中可用。'
             return
@@ -1510,7 +1495,39 @@ class HomeScreen(Screen):
             settings.setUseWideViewPort(True)
             web.setBackgroundColor(Color.BLACK)
             web.setWebChromeClient(WebChromeClient())
-            web.setWebViewClient(WebViewClient())
+
+            # Keep player navigation inside this WebView. Only allow Bilibili's
+            # player/site and media/CDN hosts; block unrelated external URLs.
+            screen_ref = self
+            class InlinePlayerWebViewClient(PythonJavaClass):
+                __javabase__ = 'android.webkit.WebViewClient'
+                __javacontext__ = 'app'
+
+                def _allow_url(self, raw_url):
+                    try:
+                        parsed = urllib.parse.urlparse(str(raw_url or ''))
+                        scheme = (parsed.scheme or '').lower()
+                        host = (parsed.hostname or '').lower()
+                        if scheme not in ('https', 'http') or not host:
+                            return False
+                        allowed_hosts = (
+                            'bilibili.com', 'biligame.com', 'hdslb.com',
+                            'bilivideo.com', 'bilivideo.cn', 'bilivideo.net',
+                            'biliapi.net', 'biliapi.com', 'biliimg.com',
+                            'bilivideo.tv'
+                        )
+                        return any(host == domain or host.endswith('.' + domain)
+                                   for domain in allowed_hosts)
+                    except Exception:
+                        return False
+
+                @java_method('(Landroid/webkit/WebView;Ljava/lang/String;)Z')
+                def shouldOverrideUrlLoading(self, view, url_value):
+                    # False means let WebView load the URL; True blocks it.
+                    return not self._allow_url(url_value)
+
+            self._inline_player_webview_client = InlinePlayerWebViewClient()
+            web.setWebViewClient(self._inline_player_webview_client)
             cookie = self.app_ref.get_cookie() or ''
             cm = CookieManager.getInstance()
             cm.setAcceptCookie(True)
@@ -1640,19 +1657,36 @@ class HomeScreen(Screen):
             web = getattr(self, '_online_webview', None)
             if web is not None:
                 try:
-                    web.stopLoading()
-                    web.loadUrl('about:blank')
-                    web.destroy()
+                    from jnius import autoclass
+                    Looper = autoclass('android.os.Looper')
+                    main_looper = Looper.getMainLooper()
+                    current_looper = Looper.myLooper()
+                    # WebView must only be manipulated on Android's main thread.
+                    # A missing Looper/MessageQueue during shutdown is treated as
+                    # a signal to skip native cleanup rather than dereference it.
+                    if main_looper is not None and current_looper is not None and current_looper.equals(main_looper):
+                        web.stopLoading()
+                        web.loadUrl('about:blank')
+                        web.destroy()
                 except Exception:
                     pass
             if overlay is not None and root is not None:
-                root.removeView(overlay)
+                try:
+                    from jnius import autoclass
+                    Looper = autoclass('android.os.Looper')
+                    main_looper = Looper.getMainLooper()
+                    current_looper = Looper.myLooper()
+                    if main_looper is not None and current_looper is not None and current_looper.equals(main_looper):
+                        root.removeView(overlay)
+                except Exception:
+                    pass
         except Exception:
             pass
         self._online_webview = None
         self._online_overlay = None
         self._online_root = None
         self._online_close_listener = None
+        self._inline_player_webview_client = None
         self._online_expand_listener = None
         self._player_expand_button = None
         self._player_close_button = None
@@ -1674,12 +1708,17 @@ class HomeScreen(Screen):
             except Exception:
                 pass
             return
-        options = [desc for qn, desc in self.qualities]
+        options = [
+            '%s%s' % (desc, (' (%s)' % qn) if qn else '')
+            for qn, desc in self.qualities
+        ]
 
         def selected(idx):
             self.quality_index = idx
             qn, desc = self.qualities[idx]
-            self.quality_btn.text = desc
+            self.quality_btn.text = (
+                '清晰度：' + desc + (' (%s)' % qn if qn else '')
+            )
         ChoicePopup(
             '选择清晰度', options, self.quality_index, selected
         ).open()
@@ -1734,7 +1773,8 @@ class HomeScreen(Screen):
         self.quality_index = 0
         self.quality_btn.disabled = not bool(self.qualities)
         self.quality_btn.text = (
-            self.qualities[0][1] if self.qualities else '当前分P暂无可用清晰度'
+            ('清晰度：' + self.qualities[0][1] + ' (%s)' % self.qualities[0][0])
+            if self.qualities else '当前分P暂无可用清晰度'
         )
         self.refresh_parts()
 
@@ -2184,7 +2224,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 ids = payload.get('accept_quality') or []
                 desc = payload.get('accept_description') or []
                 qualities_by_qn = {}
-                quality_names = {16:'360P 流畅',32:'480P 清晰',64:'720P 高清',80:'1080P 高清',112:'1080P+',116:'1080P60',120:'4K 超清',125:'HDR',126:'杜比视界',127:'8K 超高清'}
                 for i, q in enumerate(ids):
                     try:
                         qn = int(q)
@@ -2193,7 +2232,10 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     if qn <= 0 or (not cookie and qn >= 80):
                         continue
                     label = str(desc[i]).strip() if i < len(desc) and desc[i] else ''
-                    qualities_by_qn[qn] = label if label and not label.isdigit() else quality_names.get(qn, '画质 ' + str(qn))
+                    # Only expose labels actually returned by the Bilibili API.
+                    if not label or label.isdigit():
+                        continue
+                    qualities_by_qn[qn] = label
                 qualities = [{'qn': qn, 'label': label} for qn, label in sorted(qualities_by_qn.items(), reverse=True)]
                 clean_pages = []
                 for page in pages:
