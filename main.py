@@ -1325,9 +1325,23 @@ class HomeScreen(Screen):
                     # this particular response contains the corresponding stream.
                     # Restrict the menu to video IDs actually returned in DASH.
                     dash = play_data.get('dash') or {}
-                    video_streams = dash.get('video') or []
                     actual_ids = set()
-                    for stream in video_streams:
+                    for stream in (dash.get('video') or []):
+                        if not isinstance(stream, dict):
+                            continue
+                        try:
+                            sid = int(stream.get('id') or 0)
+                            if sid > 0:
+                                actual_ids.add(sid)
+                        except (TypeError, ValueError):
+                            pass
+                    # 4K/HDR/杜比视界：高码率视频轨道位于 dash.dolby.video 节点，
+                    # 不收集会导致大会员视频被错误地砍成只剩 720P。
+                    try:
+                        dolby_video = (dash.get('dolby') or {}).get('video') or []
+                    except Exception:
+                        dolby_video = []
+                    for stream in dolby_video:
                         if not isinstance(stream, dict):
                             continue
                         try:
@@ -1349,6 +1363,9 @@ class HomeScreen(Screen):
                             continue
                         if qn <= 0:
                             continue
+                        # 游客/未登录账号：不展示大会员专属画质（qn>=80 需要大会员权限）。
+                        if not has_cookie and qn >= 80:
+                            continue
                         if actual_ids and qn not in actual_ids:
                             continue
                         if not actual_ids and durl and durl_qn and qn != durl_qn:
@@ -1360,7 +1377,9 @@ class HomeScreen(Screen):
                     # Defensive fallback: derive labels from actual tracks when the
                     # API's accept_quality array is missing or inconsistent.
                     if actual_ids and not result:
-                        for qn in actual_ids:
+                        for qn in sorted(actual_ids, reverse=True):
+                            if not has_cookie and qn >= 80:
+                                continue
                             result[qn] = quality_names.get(qn, '画质 ' + str(qn))
                     return sorted(result.items(), key=lambda item: item[0], reverse=True)
 
@@ -1483,7 +1502,13 @@ class HomeScreen(Screen):
         self.auto_play_btn.fg = WHITE if self.auto_play_after_parse else INK
 
     def open_online_player(self, *_):
-        """Show the official Bilibili player inline over the preview area; expand on demand."""
+        """Show the official Bilibili player inline over the preview area; expand on demand.
+
+        所有 Android View / WebView 操作必须运行在 Android UI 线程。
+        Kivy 的 @mainthread 只调度到 Python/Kivy 线程，并非 Android UI 线程，
+        直接创建/加载/销毁 WebView 会抛
+        'Looper.mQueue on a null object reference' 崩溃。
+        """
         info = self.info or {}
         pages = self.pages or []
         # BV links use bvid; legacy AV archives may not have a bvid.
@@ -1498,7 +1523,7 @@ class HomeScreen(Screen):
             self.result_label.text = '当前分P缺少 CID，暂时无法打开播放器。'
             return
         player_params = {
-            'cid': str(cid), 'danmaku': '1', 'autoplay': '1',
+            'cid': str(cid), 'danmaku': '1', 'autoplay': '0',
             'high_quality': '1', 'as_wide': '1'
         }
         if info.get('bvid'):
@@ -1509,124 +1534,228 @@ class HomeScreen(Screen):
         if platform != 'android':
             self.result_label.text = '应用内 WebView 播放器仅在 Android APK 中可用。'
             return
+
+        # 先安全关闭可能残留的旧播放器（清 Python 引用 + UI 线程摘除 View）。
+        self.close_online_player()
+        self.result_label.text = '正在打开播放器…'
+        screen_ref = self
+
+        def _ui_create():
+            """以下全部代码运行在 Android UI 线程（由 runOnUiThread 驱动）。"""
+            try:
+                from jnius import autoclass, PythonJavaClass, java_method
+                from kivy.core.window import Window
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                WebView = autoclass('android.webkit.WebView')
+                WebViewClient = autoclass('android.webkit.WebViewClient')
+                WebChromeClient = autoclass('android.webkit.WebChromeClient')
+                CookieManager = autoclass('android.webkit.CookieManager')
+                FrameLayout = autoclass('android.widget.FrameLayout')
+                NativeButton = autoclass('android.widget.Button')
+                Gravity = autoclass('android.view.Gravity')
+                ViewGroup = autoclass('android.view.ViewGroup')
+                View = autoclass('android.view.View')
+                LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
+                FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
+                Color = autoclass('android.graphics.Color')
+                activity = PythonActivity.mActivity
+                if activity is None or activity.isFinishing() or activity.isDestroyed():
+                    screen_ref.result_label.text = '应用状态异常，暂时无法打开播放器。'
+                    return
+                # 同一 UI 线程内同步摘除任何残留播放器，防止叠加。
+                screen_ref._detach_player_ui(activity)
+
+                web = WebView(activity)
+                settings = web.getSettings()
+                settings.setJavaScriptEnabled(True)
+                settings.setDomStorageEnabled(True)
+                settings.setDatabaseEnabled(True)
+                settings.setMediaPlaybackRequiresUserGesture(False)
+                try:
+                    settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW; player embeds may request CDN media.
+                except Exception:
+                    pass
+                try:
+                    cm_enable = CookieManager.getInstance()
+                    cm_enable.setAcceptCookie(True)
+                    cm_enable.setAcceptThirdPartyCookies(web, True)
+                except Exception:
+                    pass
+                settings.setSupportZoom(False)
+                settings.setLoadWithOverviewMode(True)
+                settings.setUseWideViewPort(True)
+                web.setBackgroundColor(Color.BLACK)
+                web.setWebChromeClient(WebChromeClient())
+                # 自定义 WebViewClient：只允许 B 站播放器相关域名在 WebView 内加载，
+                # 其余外部链接一律拦截，不再唤起浏览器 / B 站 App。
+                class InlinePlayerClient(PythonJavaClass):
+                    __javainterfaces__ = ['android/webkit/WebViewClient']
+                    __javacontext__ = 'app'
+                    @java_method('(Landroid/webkit/WebView;Ljava/lang/String;)Z')
+                    def shouldOverrideUrlLoading(self, view, url_string):
+                        try:
+                            from urllib.parse import urlparse
+                            host = (urlparse(str(url_string)).netloc or '').lower()
+                            allowed = (
+                                host == 'bilibili.com'
+                                or host == 'www.bilibili.com'
+                                or host == 'player.bilibili.com'
+                                or host.endswith('.bilibili.com')
+                                or host == 'b23.tv'
+                            )
+                            return not allowed
+                        except Exception:
+                            return False
+                web.setWebViewClient(InlinePlayerClient())
+
+                cookie = screen_ref.app_ref.get_cookie() or ''
+                cm = CookieManager.getInstance()
+                cm.setAcceptCookie(True)
+                if cookie:
+                    for pair in cookie.split(';'):
+                        pair = pair.strip()
+                        if '=' in pair:
+                            cm.setCookie('https://www.bilibili.com/', pair)
+                            cm.setCookie('https://player.bilibili.com/', pair)
+                try:
+                    cm.flush()
+                except Exception:
+                    pass
+
+                root = activity.findViewById(autoclass('android.R$id').content)
+                overlay = FrameLayout(activity)
+                overlay.setBackgroundColor(Color.TRANSPARENT)
+                # Keep the overlay container full-sized, but the WebView itself is placed
+                # exactly over the Kivy preview widget so it does not cover labels/buttons.
+                overlay_params = LayoutParams(-1, -1)
+                root.addView(overlay, overlay_params)
+                screen_ref._online_webview = web
+                screen_ref._online_overlay = overlay
+                screen_ref._online_root = root
+                screen_ref._player_native = {
+                    'FrameParams': FrameParams, 'Gravity': Gravity,
+                    'NativeButton': NativeButton, 'Color': Color,
+                    'Window': Window, 'ViewGroup': ViewGroup,
+                }
+                screen_ref._player_fullscreen = False
+                screen_ref._player_web_params = None
+                overlay.addView(web)
+
+                class ToggleListener(PythonJavaClass):
+                    __javainterfaces__ = ['android/view/View$OnClickListener']
+                    __javacontext__ = 'app'
+                    @java_method('(Landroid/view/View;)V')
+                    def onClick(self, view):
+                        Clock.schedule_once(lambda _dt: screen_ref.toggle_player_size(), 0)
+                class CloseListener(PythonJavaClass):
+                    __javainterfaces__ = ['android/view/View$OnClickListener']
+                    __javacontext__ = 'app'
+                    @java_method('(Landroid/view/View;)V')
+                    def onClick(self, view):
+                        Clock.schedule_once(lambda _dt: screen_ref.close_online_player(), 0)
+                expand_btn = NativeButton(activity)
+                expand_btn.setText('放大 ⛶')
+                expand_btn.setTextColor(Color.WHITE)
+                expand_btn.setBackgroundColor(Color.argb(225, 210, 45, 95))
+                close_btn = NativeButton(activity)
+                close_btn.setText('关闭 ×')
+                close_btn.setTextColor(Color.WHITE)
+                close_btn.setBackgroundColor(Color.argb(225, 70, 70, 70))
+                ep = FrameParams(-2, -2)
+                ep.gravity = Gravity.TOP | Gravity.RIGHT
+                ep.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
+                cp = FrameParams(-2, -2)
+                cp.gravity = Gravity.TOP | Gravity.LEFT
+                cp.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
+                overlay.addView(expand_btn, ep)
+                overlay.addView(close_btn, cp)
+                screen_ref._online_expand_listener = ToggleListener()
+                screen_ref._online_close_listener = CloseListener()
+                expand_btn.setOnClickListener(screen_ref._online_expand_listener)
+                close_btn.setOnClickListener(screen_ref._online_close_listener)
+                screen_ref._player_expand_button = expand_btn
+                screen_ref._player_close_button = close_btn
+                screen_ref._position_inline_player()
+                web.loadUrl(url)
+                Clock.schedule_once(lambda _dt: screen_ref._player_opened_hint(), 0)
+            except Exception as exc:
+                Clock.schedule_once(lambda _dt: screen_ref._player_failed_hint(exc), 0)
+
+        self._run_on_ui(_ui_create)
+
+    def _run_on_ui(self, func):
+        """将 func 调度到 Android UI 线程执行（Runnable 包装 + runOnUiThread）。
+
+        Kivy 的 @mainthread 调度到的是 Python/Kivy 线程，并不是 Android UI 线程；
+        所有 Android View / WebView 操作（创建、addView、removeView、loadUrl、
+        setLayoutParams、onPause、stopLoading 等）都必须经由本方法，否则会抛
+        'Looper.mQueue on a null object reference' 崩溃。
+        """
         try:
             from jnius import autoclass, PythonJavaClass, java_method
-            from kivy.core.window import Window
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            WebView = autoclass('android.webkit.WebView')
-            WebViewClient = autoclass('android.webkit.WebViewClient')
-            WebChromeClient = autoclass('android.webkit.WebChromeClient')
-            CookieManager = autoclass('android.webkit.CookieManager')
-            FrameLayout = autoclass('android.widget.FrameLayout')
-            NativeButton = autoclass('android.widget.Button')
-            Gravity = autoclass('android.view.Gravity')
-            ViewGroup = autoclass('android.view.ViewGroup')
-            View = autoclass('android.view.View')
-            LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
-            FrameParams = autoclass('android.widget.FrameLayout$LayoutParams')
-            Color = autoclass('android.graphics.Color')
             activity = PythonActivity.mActivity
-            self.close_online_player()
-            web = WebView(activity)
-            settings = web.getSettings()
-            settings.setJavaScriptEnabled(True)
-            settings.setDomStorageEnabled(True)
-            settings.setDatabaseEnabled(True)
-            settings.setMediaPlaybackRequiresUserGesture(False)
+            if activity is None:
+                return
+            class UiRunnable(PythonJavaClass):
+                __javainterfaces__ = ['java/lang/Runnable']
+                __javacontext__ = 'app'
+                @java_method('()V')
+                def run(self):
+                    func()
+            activity.runOnUiThread(UiRunnable())
+        except Exception:
+            # runOnUiThread 不可用（如 Activity 已销毁）时静默降级，避免二次崩溃。
             try:
-                settings.setMixedContentMode(0)  # MIXED_CONTENT_ALWAYS_ALLOW; player embeds may request CDN media.
-            except Exception:
-                pass
-            try:
-                cm_enable = CookieManager.getInstance()
-                cm_enable.setAcceptCookie(True)
-                cm_enable.setAcceptThirdPartyCookies(web, True)
-            except Exception:
-                pass
-            settings.setSupportZoom(False)
-            settings.setLoadWithOverviewMode(True)
-            settings.setUseWideViewPort(True)
-            web.setBackgroundColor(Color.BLACK)
-            web.setWebChromeClient(WebChromeClient())
-            web.setWebViewClient(WebViewClient())
-            cookie = self.app_ref.get_cookie() or ''
-            cm = CookieManager.getInstance()
-            cm.setAcceptCookie(True)
-            if cookie:
-                for pair in cookie.split(';'):
-                    pair = pair.strip()
-                    if '=' in pair:
-                        cm.setCookie('https://www.bilibili.com/', pair)
-                        cm.setCookie('https://player.bilibili.com/', pair)
-            try:
-                cm.flush()
+                func()
             except Exception:
                 pass
 
-            root = activity.findViewById(autoclass('android.R$id').content)
-            overlay = FrameLayout(activity)
-            overlay.setBackgroundColor(Color.TRANSPARENT)
-            # Keep the overlay container full-sized, but the WebView itself is placed
-            # exactly over the Kivy preview widget so it does not cover labels/buttons.
-            overlay_params = LayoutParams(-1, -1)
-            root.addView(overlay, overlay_params)
-            self._online_webview = web
-            self._online_overlay = overlay
-            self._online_root = root
-            self._player_native = {
-                'FrameParams': FrameParams, 'Gravity': Gravity,
-                'NativeButton': NativeButton, 'Color': Color,
-                'Window': Window, 'ViewGroup': ViewGroup,
-            }
-            self._player_fullscreen = False
-            self._player_web_params = None
-            overlay.addView(web)
+    def _detach_player_ui(self, activity):
+        """UI 线程内同步摘除残留播放器（仅 View 层操作，不触 WebView.destroy()）。"""
+        web = getattr(self, '_online_webview', None)
+        overlay = getattr(self, '_online_overlay', None)
+        if web is not None:
+            try:
+                web.onPause()
+            except Exception:
+                pass
+            try:
+                web.pauseTimers()
+            except Exception:
+                pass
+            try:
+                web.stopLoading()
+            except Exception:
+                pass
+        if overlay is not None:
+            try:
+                parent = overlay.getParent()
+                if parent is not None:
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+        self._online_webview = None
+        self._online_overlay = None
+        self._online_root = None
+        self._online_close_listener = None
+        self._online_expand_listener = None
+        self._player_expand_button = None
+        self._player_close_button = None
+        self._player_native = None
+        self._player_fullscreen = False
 
-            screen_ref = self
-            class ToggleListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
-                __javacontext__ = 'app'
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    Clock.schedule_once(lambda _dt: screen_ref.toggle_player_size(), 0)
-            class CloseListener(PythonJavaClass):
-                __javainterfaces__ = ['android/view/View$OnClickListener']
-                __javacontext__ = 'app'
-                @java_method('(Landroid/view/View;)V')
-                def onClick(self, view):
-                    Clock.schedule_once(lambda _dt: screen_ref.close_online_player(), 0)
-            expand_btn = NativeButton(activity)
-            expand_btn.setText('放大 ⛶')
-            expand_btn.setTextColor(Color.WHITE)
-            expand_btn.setBackgroundColor(Color.argb(225, 210, 45, 95))
-            close_btn = NativeButton(activity)
-            close_btn.setText('关闭 ×')
-            close_btn.setTextColor(Color.WHITE)
-            close_btn.setBackgroundColor(Color.argb(225, 70, 70, 70))
-            ep = FrameParams(-2, -2)
-            ep.gravity = Gravity.TOP | Gravity.RIGHT
-            ep.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
-            cp = FrameParams(-2, -2)
-            cp.gravity = Gravity.TOP | Gravity.LEFT
-            cp.topMargin = int(dp(4) * activity.getResources().getDisplayMetrics().density)
-            overlay.addView(expand_btn, ep)
-            overlay.addView(close_btn, cp)
-            self._online_expand_listener = ToggleListener()
-            self._online_close_listener = CloseListener()
-            expand_btn.setOnClickListener(self._online_expand_listener)
-            close_btn.setOnClickListener(self._online_close_listener)
-            self._player_expand_button = expand_btn
-            self._player_close_button = close_btn
-            self._position_inline_player()
-            web.loadUrl(url)
-            self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
-            self.result_label.text = '播放器已显示在视频预览区域，不会覆盖标题和下载设置。'
-        except Exception as exc:
-            self.result_label.text = '应用内播放器启动失败：' + safe_text(exc, 160)
+    def _player_opened_hint(self):
+        self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
+        self.result_label.text = '播放器已显示在视频预览区域，不会覆盖标题和下载设置。'
+
+    def _player_failed_hint(self, exc):
+        self.result_label.text = '应用内播放器启动失败：' + safe_text(exc, 160)
 
     def _position_inline_player(self):
         """Position the native WebView over the preview widget using Android pixels."""
-        if not getattr(self, '_online_webview', None) or getattr(self, '_player_fullscreen', False):
+        web = getattr(self, '_online_webview', None)
+        if web is None or getattr(self, '_player_fullscreen', False):
             return
         try:
             from kivy.core.window import Window
@@ -1639,8 +1768,15 @@ class HomeScreen(Screen):
             params = FrameParams(int(width * density), int(height * density))
             params.leftMargin = int(x * density)
             params.topMargin = int((Window.height - y - height) * density)
-            self._online_webview.setLayoutParams(params)
             self._player_web_params = params
+            self._run_on_ui(lambda: self._apply_layout_params(web, params))
+        except Exception:
+            pass
+
+    def _apply_layout_params(self, web, params):
+        """UI 线程内应用 WebView 布局参数（setLayoutParams 必须在 Android UI 线程）。"""
+        try:
+            web.setLayoutParams(params)
         except Exception:
             pass
 
@@ -1666,49 +1802,22 @@ class HomeScreen(Screen):
                 params.topMargin = int((self._player_native['Window'].height - y - self.cover_preview.height) * density)
                 self._player_expand_button.setText('放大 ⛶')
                 self.player_hint.text = '视频播放器已嵌入此处；点击“放大”进入全屏。'
-            self._online_webview.setLayoutParams(params)
+            web = self._online_webview
+            self._run_on_ui(lambda: self._apply_layout_params(web, params))
         except Exception as exc:
             self.result_label.text = '切换播放器大小失败：' + safe_text(exc, 120)
 
-    @mainthread
     def close_online_player(self, *_):
         """Detach the embedded WebView safely without invoking fragile teardown APIs.
 
-        On some Android builds WebView.destroy()/client cleanup during Activity shutdown
-        throws: "Attempt to read ... Looper.mQueue on a null object reference". Remove
-        the overlay from the Activity root and drop Python references; deliberately avoid
-        loadUrl(), destroy(), removeAllViews() and client setters during shutdown.
+        Android View 操作（removeView、onPause、pauseTimers、stopLoading）全部经由
+        runOnUiThread 在 Android UI 线程执行；Kivy @mainthread 对此无效，直接调用会抛
+        'Attempt to read ... Looper.mQueue on a null object reference' 崩溃。
+        刻意不调用 WebView.destroy() / removeAllViews()，规避 Activity 关闭时的死 Looper。
         """
-        overlay = getattr(self, '_online_overlay', None)
-        root = getattr(self, '_online_root', None)
         web = getattr(self, '_online_webview', None)
-        try:
-            if overlay is not None:
-                try:
-                    parent = overlay.getParent()
-                    if parent is not None:
-                        parent.removeView(overlay)
-                except Exception:
-                    pass
-            # Stop playback only while the Activity is still alive. No navigation or
-            # WebView destruction is issued here because those can touch a dead Looper.
-            if web is not None:
-                try:
-                    from jnius import autoclass
-                    activity = autoclass('org.kivy.android.PythonActivity').mActivity
-                    if activity is not None and not activity.isFinishing():
-                        try:
-                            if hasattr(activity, 'isDestroyed') and activity.isDestroyed():
-                                raise RuntimeError('Activity already destroyed')
-                            web.onPause()
-                            web.pauseTimers()
-                            web.stopLoading()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        overlay = getattr(self, '_online_overlay', None)
+        # 先清 Python 层引用，避免并发重复进入。
         self._online_webview = None
         self._online_overlay = None
         self._online_root = None
@@ -1718,6 +1827,35 @@ class HomeScreen(Screen):
         self._player_close_button = None
         self._player_native = None
         self._player_fullscreen = False
+        if web is None and overlay is None:
+            return
+
+        def _ui_close():
+            try:
+                if web is not None:
+                    try:
+                        web.onPause()
+                    except Exception:
+                        pass
+                    try:
+                        web.pauseTimers()
+                    except Exception:
+                        pass
+                    try:
+                        web.stopLoading()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                if overlay is not None:
+                    parent = overlay.getParent()
+                    if parent is not None:
+                        parent.removeView(overlay)
+            except Exception:
+                pass
+
+        self._run_on_ui(_ui_close)
 
     @mainthread
     def _set_cover_preview(self, raw):
@@ -2254,6 +2392,17 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 dash = payload.get('dash') or {}
                 actual_ids = set()
                 for stream in (dash.get('video') or []):
+                    if isinstance(stream, dict):
+                        try:
+                            sid = int(stream.get('id') or 0)
+                            if sid > 0: actual_ids.add(sid)
+                        except (TypeError, ValueError):
+                            pass
+                try:
+                    dolby_video = (dash.get('dolby') or {}).get('video') or []
+                except Exception:
+                    dolby_video = []
+                for stream in dolby_video:
                     if isinstance(stream, dict):
                         try:
                             sid = int(stream.get('id') or 0)
