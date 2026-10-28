@@ -74,7 +74,6 @@ def get_nav(session):
     return data if data.get('isLogin') else None
 
 def _normalize_cover_url(value):
-    """Normalize legacy/protocol-relative Bilibili cover URLs."""
     value = str(value or '').strip()
     if value.startswith('//'):
         return 'https:' + value
@@ -107,8 +106,6 @@ def get_video_info(session, url_or_id):
     }
 
 def _wbi_mixin_key(session):
-    # Official web-client WBI key derivation. If the key endpoint changes,
-    # caller falls back to the legacy playurl endpoint below.
     data = _api_json(session, API + '/x/web-interface/nav')
     wbi = data.get('wbi_img') or {}
     img = (wbi.get('img_url') or '').rsplit('/', 1)[-1].split('.')[0]
@@ -134,18 +131,16 @@ def _signed_playurl(session, info, qn, mixin=None):
     return _api_json(session, API + '/x/player/wbi/playurl', params)
 
 def get_play_info(session, info, cookie=''):
-    """Return qualities explicitly exposed by Bilibili.
+    """Return qualities explicitly exposed by Bilibili."""
     
-    修复说明：去掉了原有代码中的多次循环探测逻辑。原逻辑会导致未登录时
-    强行拼接不同请求的假画质，导致 UI 显示不真实或下载卡死。
-    现在只发起一次最高画质请求，完全信任 B 站根据当前 Cookie 权限返回的真实流。
-    """
+    # 【新增逻辑】：如果传入了 cookie，强行更新 session 的请求头
+    if cookie:
+        session.headers.update({'Cookie': cookie})
+        
     try:
         mixin = _wbi_mixin_key(session)
-        # 只请求一次最高画质，B 站会自动进行权限降级，返回真实可用的 dash.video
         result = _signed_playurl(session, info, 127, mixin=mixin)
     except Exception:
-        # 兼容性回退：带 WBI 签名的接口失效时，使用传统接口
         params = {'cid': info['cid'], 'qn': 127, 'fnval': 1, 'fnver': 0, 'fourk': 1}
         if info.get('bvid'):
             params['bvid'] = info['bvid']
@@ -159,7 +154,6 @@ def get_play_info(session, info, cookie=''):
     data = result
     quality_map = {}
     
-    # 直接提取 B 站返回的真实画质（dash.video），绝不编造
     dash = data.get('dash') or {}
     for stream in dash.get('video') or []:
         try:
@@ -169,7 +163,6 @@ def get_play_info(session, info, cookie=''):
         if q:
             quality_map[q] = _quality_label(q)
 
-    # 兼容传统的 durl 渐进式流（通常是不带音视频分离的老视频或低清视频）
     if data.get('durl'):
         try:
             actual_q = int(data.get('quality') or 0)
@@ -201,7 +194,6 @@ def format_duration(seconds):
 # -------------------- Homepage / player / interaction API --------------------
 
 def _api_data_flexible(session, url, params=None):
-    """API helper for endpoints that may return useful data as None."""
     r = session.get(url, params=params, timeout=20)
     r.raise_for_status()
     try:
@@ -234,7 +226,6 @@ def _normalize_video(view):
 
 
 def get_popular_videos(session, page=1, page_size=20):
-    """Return normalized public popular videos for a homepage feed."""
     page = max(1, int(page or 1))
     page_size = min(50, max(1, int(page_size or 20)))
     data = _api_data_flexible(
@@ -244,7 +235,6 @@ def get_popular_videos(session, page=1, page_size=20):
         return []
     result = []
     for item in data.get('list') or []:
-        # Popular API normally returns archive fields directly; some variants wrap them.
         view = item.get('archive') if isinstance(item.get('archive'), dict) else item
         normalized = _normalize_video(view)
         if normalized.get('bvid'):
@@ -253,17 +243,14 @@ def get_popular_videos(session, page=1, page_size=20):
 
 
 def get_recommended_videos(session, page=1, page_size=20):
-    """Compatibility alias for the homepage feed."""
     return get_popular_videos(session, page, page_size)
 
 
 def get_video_detail(session, url_or_id):
-    """Return normalized video detail, matching get_video_info's data shape."""
     return get_video_info(session, url_or_id)
 
 
 def get_comments(session, info_or_aid, page=1, page_size=20, sort=2):
-    """Fetch public top-level comments for a video."""
     aid = info_or_aid.get('aid') if isinstance(info_or_aid, dict) else info_or_aid
     if not aid:
         raise BiliAPIError('缺少视频 aid，无法获取评论')
@@ -287,7 +274,6 @@ def get_comments(session, info_or_aid, page=1, page_size=20, sort=2):
 
 
 def get_danmaku(session, cid, limit=1000):
-    """Fetch danmaku XML and return parsed timed entries."""
     import xml.etree.ElementTree as ET
     if not cid:
         raise BiliAPIError('缺少视频 cid，无法获取弹幕')
@@ -326,7 +312,6 @@ def get_danmaku_xml_url(cid):
 
 
 def get_stream_urls(session, info, quality=80):
-    """Return direct stream metadata; DASH video/audio are separate streams."""
     if not isinstance(info, dict):
         raise BiliAPIError('视频信息格式不正确')
     play = get_play_info(session, info)
@@ -361,7 +346,6 @@ def _csrf(session):
     except Exception:
         value = None
     if not value:
-        # Some sessions use a manually supplied cookie jar.
         for cookie in getattr(session.cookies, 'jar', []):
             if cookie.name == 'bili_jct':
                 value = cookie.value
@@ -428,7 +412,6 @@ def get_favorite_folders(session, mid=None, page=1, page_size=20):
 
 
 def favorite_video(session, info_or_aid, folder_id=None, add=True):
-    """Add/remove a video in a chosen favorite folder (defaults to first folder)."""
     aid = info_or_aid.get('aid') if isinstance(info_or_aid, dict) else info_or_aid
     if not aid:
         raise BiliAPIError('缺少视频 aid')
@@ -454,7 +437,6 @@ def follow_user(session, mid, follow=True):
 
 
 def get_subtitle_list(session, info):
-    """Return subtitle tracks from player/v2, when available."""
     if not isinstance(info, dict) or not info.get('cid') or not info.get('bvid'):
         raise BiliAPIError('缺少视频信息，无法获取字幕')
     data = _api_data_flexible(session, API + '/x/player/v2', {
