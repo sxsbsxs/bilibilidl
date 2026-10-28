@@ -134,107 +134,57 @@ def _signed_playurl(session, info, qn, mixin=None):
     return _api_json(session, API + '/x/player/wbi/playurl', params)
 
 def get_play_info(session, info, cookie=''):
-    """Return qualities explicitly exposed by Bilibili, merging safe qn probes.
-
-    Some archives return a very short accept_quality list for qn=127. Probe a few
-    lower requested qualities and union only quality IDs that Bilibili itself returns;
-    this does not invent permissions or make a restricted stream downloadable.
+    """Return qualities explicitly exposed by Bilibili.
+    
+    修复说明：去掉了原有代码中的多次循环探测逻辑。原逻辑会导致未登录时
+    强行拼接不同请求的假画质，导致 UI 显示不真实或下载卡死。
+    现在只发起一次最高画质请求，完全信任 B 站根据当前 Cookie 权限返回的真实流。
     """
-    responses = []
     try:
         mixin = _wbi_mixin_key(session)
-        first_error = None
-        # Start with the highest request. Only probe lower qn values when the first
-        # response reports a narrow list, to avoid unnecessary requests for normal videos.
-        for qn in (127, 80, 64, 32, 16):
-            try:
-                result = _signed_playurl(session, info, qn, mixin=mixin)
-                if isinstance(result, dict):
-                    responses.append(result)
-                accepted_now = result.get('accept_quality') or []
-                if qn == 127 and len(accepted_now) >= 4:
-                    break
-            except Exception as exc:
-                if first_error is None:
-                    first_error = exc
-                # If the highest request itself failed, lower qn requests can still work.
-                continue
-        if not responses:
-            raise first_error or BiliAPIError('B站没有返回可用播放信息')
+        # 只请求一次最高画质，B 站会自动进行权限降级，返回真实可用的 dash.video
+        result = _signed_playurl(session, info, 127, mixin=mixin)
     except Exception:
-        # Compatibility fallback for deployments/videos where the signed endpoint fails.
+        # 兼容性回退：带 WBI 签名的接口失效时，使用传统接口
         params = {'cid': info['cid'], 'qn': 127, 'fnval': 1, 'fnver': 0, 'fourk': 1}
         if info.get('bvid'):
             params['bvid'] = info['bvid']
         else:
             params['avid'] = info.get('aid')
-        data = _api_json(session, API + '/x/player/playurl', params)
-        responses = [data]
+        result = _api_json(session, API + '/x/player/playurl', params)
 
-    # If the signed endpoint still reports fewer than four tiers, try the legacy
-    # playurl endpoint for intermediate tiers. This is only a discovery attempt;
-    # a tier is shown only if Bilibili returns an actual stream/accepted quality.
-    def _seen_quality_ids(items):
-        found = set()
-        for item in items:
-            for value in item.get('accept_quality') or []:
-                try:
-                    found.add(int(value))
-                except (TypeError, ValueError):
-                    pass
-            for stream in ((item.get('dash') or {}).get('video') or []):
-                try:
-                    found.add(int(stream.get('id') or 0))
-                except (TypeError, ValueError):
-                    pass
-        return found
+    if not isinstance(result, dict):
+        raise BiliAPIError('B站没有返回可用播放信息')
 
-    if len(_seen_quality_ids(responses)) < 4:
-        for probe_qn in (74, 64, 32):
-            params = {'cid': info['cid'], 'qn': probe_qn,
-                      'fnval': 4048, 'fnver': 0, 'fourk': 1}
-            if info.get('bvid'):
-                params['bvid'] = info['bvid']
-            else:
-                params['avid'] = info.get('aid')
-            try:
-                legacy_result = _api_json(session, API + '/x/player/playurl', params)
-                if isinstance(legacy_result, dict):
-                    responses.append(legacy_result)
-            except Exception as exc:
-                # Keep the already usable signed response if legacy access is blocked.
-                print('[bilibilidl] 备用画质查询 qn=%s 失败: %s' % (probe_qn, str(exc)[:100]))
-
-    # Keep the first response as the primary payload, but show only qualities for
-    # which at least one request actually returned a playable stream. accept_quality
-    # can list theoretical/account-supported tiers while a specific request still
-    # returns only 360P; showing it alone makes the UI misleading.
-    data = responses[0]
+    data = result
     quality_map = {}
-    for response in responses:
-        dash = response.get('dash') or {}
-        for stream in dash.get('video') or []:
-            try:
-                q = int(stream.get('id') or 0)
-            except (TypeError, ValueError):
-                continue
-            if q:
-                quality_map[q] = _quality_label(q)
-        # Legacy progressive stream: quality is valid only when durl exists.
-        if response.get('durl'):
-            try:
-                actual_q = int(response.get('quality') or 0)
-            except (TypeError, ValueError):
-                actual_q = 0
-            if actual_q:
-                quality_map[actual_q] = _quality_label(actual_q)
+    
+    # 直接提取 B 站返回的真实画质（dash.video），绝不编造
+    dash = data.get('dash') or {}
+    for stream in dash.get('video') or []:
+        try:
+            q = int(stream.get('id') or 0)
+        except (TypeError, ValueError):
+            continue
+        if q:
+            quality_map[q] = _quality_label(q)
+
+    # 兼容传统的 durl 渐进式流（通常是不带音视频分离的老视频或低清视频）
+    if data.get('durl'):
+        try:
+            actual_q = int(data.get('quality') or 0)
+        except (TypeError, ValueError):
+            actual_q = 0
+        if actual_q:
+            quality_map[actual_q] = _quality_label(actual_q)
+
     quality_map = dict(sorted(quality_map.items(), reverse=True))
     if quality_map:
         data['accept_quality'] = list(quality_map.keys())
         data['accept_description'] = list(quality_map.values())
+        
     return {'data': data, 'qualities': quality_map,
             'format': ('dash' if data.get('dash') else 'durl')}
-
 
 def _quality_label(q):
     labels = {127: '8K', 126: '杜比视界', 125: 'HDR', 120: '4K',
@@ -511,4 +461,3 @@ def get_subtitle_list(session, info):
         'bvid': info['bvid'], 'cid': int(info['cid']),
     }) or {}
     return (data.get('subtitle') or {}).get('subtitles') or []
-
